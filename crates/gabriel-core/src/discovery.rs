@@ -80,6 +80,27 @@ pub struct PeerInfo {
     pub last_seen: Instant,
 }
 
+impl PeerInfo {
+    /// Where to reach this peer's mesh router, or `None` if it isn't
+    /// running one.
+    ///
+    /// `gnp_port == 0` is how a peer says "I'm on the network, but I have
+    /// no mesh listener" -- a discovery-only client (`gabriel-client
+    /// discover`) announces exactly that. Port 0 is not a connectable
+    /// address, so callers building a neighbor table must skip these
+    /// peers; feeding one to `NeighborTable` means every flood wastes a
+    /// connection attempt that can only ever fail with "the requested
+    /// address is not valid in its context". Returning an `Option` rather
+    /// than a bare `SocketAddr` is what stops a call site from forgetting
+    /// that.
+    pub fn mesh_addr(&self) -> Option<SocketAddr> {
+        if self.gnp_port == 0 {
+            return None;
+        }
+        Some(SocketAddr::new(self.addr.ip(), self.gnp_port))
+    }
+}
+
 #[derive(Default)]
 struct PeerTable {
     peers: Mutex<HashMap<[u8; 32], PeerInfo>>,
@@ -285,6 +306,36 @@ mod tests {
         assert!(
             b_as_seen_by_a.offers_gateway,
             "peer b advertised offers_gateway=true, a should have recorded that"
+        );
+    }
+
+    /// A discovery-only peer (no mesh router, so it announces `gnp_port:
+    /// 0`) must not end up in anyone's neighbor table: port 0 isn't a
+    /// connectable address, and trying produces a guaranteed-to-fail
+    /// connect on every single flood.
+    #[test]
+    fn mesh_addr_is_none_for_a_peer_without_a_mesh_listener() {
+        let base = PeerInfo {
+            device_id: [0u8; 32],
+            display_name: "discovery-only".into(),
+            addr: "192.168.1.50:50159".parse().unwrap(),
+            gnp_port: 0,
+            offers_gateway: false,
+            last_seen: Instant::now(),
+        };
+        assert_eq!(base.mesh_addr(), None);
+
+        let with_listener = PeerInfo {
+            gnp_port: 42426,
+            ..base
+        };
+        // Note the IP comes from where the announcement was seen coming
+        // from, while the port comes from what the peer advertised -- the
+        // announcement's own source port is an ephemeral send-socket port
+        // and is useless for connecting back.
+        assert_eq!(
+            with_listener.mesh_addr(),
+            Some("192.168.1.50:42426".parse().unwrap())
         );
     }
 

@@ -87,7 +87,11 @@ async fn main() -> anyhow::Result<()> {
         async move {
             loop {
                 for peer in discovery.peers() {
-                    neighbors.set(peer.device_id, SocketAddr::new(peer.addr.ip(), peer.gnp_port));
+                    // Skips discovery-only peers (no mesh listener) -- see
+                    // PeerInfo::mesh_addr.
+                    if let Some(addr) = peer.mesh_addr() {
+                        neighbors.set(peer.device_id, addr);
+                    }
                 }
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
