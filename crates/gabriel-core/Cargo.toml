@@ -1,0 +1,31 @@
+[package]
+name = "gabriel-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Gabriel protocol, identity, crypto and local data model shared by client and gateway"
+
+[dependencies]
+# Local data
+rusqlite = { version = "0.31", features = ["bundled"] }
+# Serialization for GNP packets and discovery announcements
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+# Error handling
+thiserror = "1"
+anyhow = "1"
+# Async runtime (used by both the service and the client)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util"] }
+# LAN discovery: multicast sockets with options (SO_REUSEADDR, join_multicast_v4)
+# that std::net::UdpSocket can't set before bind
+socket2 = "0.5"
+# Identity / discovery authentication (software-backed for v0.1; the plan is
+# to move private-key storage behind Windows CNG/TPM later without changing
+# this crate's public Identity API -- see identity.rs)
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+# Cryptographic agility layer's second (post-quantum) algorithm: NIST FIPS
+# 204 ML-DSA, pure Rust (no C toolchain/liboqs needed) -- see crypto.rs.
+# ml-dsa re-exports the `signature` crate traits (Signer/Verifier/Keypair)
+# it needs directly, so no separate `signature` dependency here.
+ml-dsa = "0.1"

@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+*.pdb
+.vs/
+*.db
+*.sqlite
+*.sqlite3
+# Device identity private keys (dev-generated, never shared or committed)
+*.key
+build.cmd
+verify.cmd

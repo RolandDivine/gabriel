@@ -1,0 +1,16 @@
+[package]
+name = "gabriel-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Gabriel client -- v0.1 is a CLI stub; WinUI 3 or Tauri front-end comes once core protocol/mesh behavior is proven"
+
+[[bin]]
+name = "gabriel-client"
+path = "src/main.rs"
+
+[dependencies]
+gabriel-core = { path = "../gabriel-core" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util"] }
