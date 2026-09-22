@@ -4,6 +4,7 @@ members = [
     "crates/gabriel-core",
     "crates/gabriel-gatewayd",
     "crates/gabriel-client",
+    "crates/gabriel-ffi",
 ]
 
 [workspace.package]

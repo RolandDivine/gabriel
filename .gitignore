@@ -9,3 +9,11 @@
 *.key
 build.cmd
 verify.cmd
+
+# C# / WinUI build output
+[Bb]in/
+[Oo]bj/
+*.user
+ffibuild.cmd
+dumpexports.cmd
+uibuild.cmd

@@ -1,0 +1,18 @@
+[package]
+name = "gabriel-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "C ABI over gabriel-core, so a non-Rust UI (the WinUI 3 client) can drive a Gabriel node"
+
+[lib]
+name = "gabriel_ffi"
+# cdylib: a plain DLL with a C ABI, which is what C# P/Invoke loads.
+crate-type = ["cdylib"]
+
+[dependencies]
+gabriel-core = { path = "../gabriel-core" }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"

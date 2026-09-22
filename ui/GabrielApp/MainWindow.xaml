@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="GabrielApp.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:GabrielApp"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid Padding="20" RowSpacing="14" ColumnSpacing="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="1*"/>
+            <ColumnDefinition Width="1.2*"/>
+        </Grid.ColumnDefinitions>
+
+        <!-- Header -->
+        <StackPanel Grid.Row="0" Grid.ColumnSpan="2" Spacing="4">
+            <TextBlock Text="Gabriel" FontSize="28" FontWeight="SemiBold"/>
+            <TextBlock x:Name="StatusText"
+                       Text="Starting…"
+                       Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"/>
+            <TextBlock x:Name="DeviceIdText"
+                       Text=""
+                       FontFamily="Consolas"
+                       FontSize="12"
+                       IsTextSelectionEnabled="True"
+                       Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"/>
+        </StackPanel>
+
+        <!-- Peers -->
+        <Border Grid.Row="1" Grid.Column="0"
+                BorderThickness="1"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                CornerRadius="8"
+                Padding="12">
+            <Grid RowSpacing="8">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <TextBlock Grid.Row="0" Text="Devices on your network" FontWeight="SemiBold"/>
+
+                <ListView Grid.Row="1" x:Name="PeerList" SelectionMode="None">
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="local:PeerView">
+                            <StackPanel Padding="0,6">
+                                <TextBlock Text="{x:Bind Summary}"/>
+                                <TextBlock Text="{x:Bind Details}"
+                                           FontSize="11"
+                                           FontFamily="Consolas"
+                                           Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"/>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+            </Grid>
+        </Border>
+
+        <!-- Messages -->
+        <Border Grid.Row="1" Grid.Column="1"
+                BorderThickness="1"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                CornerRadius="8"
+                Padding="12">
+            <Grid RowSpacing="8">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <TextBlock Grid.Row="0" Text="Messages" FontWeight="SemiBold"/>
+
+                <ListView Grid.Row="1" x:Name="MessageList" SelectionMode="None">
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="local:MessageEntry">
+                            <StackPanel Padding="0,6">
+                                <TextBlock Text="{x:Bind Header}"
+                                           FontSize="11"
+                                           Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"/>
+                                <TextBlock Text="{x:Bind Text}" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+
+                <Grid Grid.Row="2" ColumnSpacing="8" RowSpacing="8">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <ComboBox Grid.Row="0" Grid.ColumnSpan="2"
+                              x:Name="RecipientBox"
+                              HorizontalAlignment="Stretch"
+                              PlaceholderText="Send to…">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate x:DataType="local:PeerView">
+                                <TextBlock Text="{x:Bind Summary}"/>
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
+
+                    <TextBox Grid.Row="1" Grid.Column="0"
+                             x:Name="MessageBox"
+                             PlaceholderText="Type a message"
+                             KeyDown="MessageBox_KeyDown"/>
+
+                    <Button Grid.Row="1" Grid.Column="1"
+                            x:Name="SendButton"
+                            Content="Send"
+                            Style="{ThemeResource AccentButtonStyle}"
+                            Click="SendButton_Click"/>
+                </Grid>
+            </Grid>
+        </Border>
+
+        <!-- Honest footer: this matters more than it looks. -->
+        <InfoBar Grid.Row="2" Grid.ColumnSpan="2"
+                 IsOpen="True"
+                 IsClosable="False"
+                 Severity="Warning"
+                 Title="Messages are signed, not encrypted"
+                 Message="Recipients can verify who sent a message and that nobody altered it, but the text itself is readable by any device relaying it. End-to-end encryption is not implemented yet — don't send anything sensitive."/>
+    </Grid>
+</Window>
