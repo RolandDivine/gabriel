@@ -62,7 +62,7 @@ export const CHAINS = Object.freeze({
   ethereum: {
     id: "ethereum", name: "Ethereum", family: "evm", symbol: "ETH",
     decimals: 18, coinType: 60, purpose: 44, chainId: 1,
-    rpc: "https://eth.llamarpc.com", explorer: "https://etherscan.io",
+    rpc: "https://ethereum-rpc.publicnode.com", explorer: "https://etherscan.io",
     stablecoins: {
       USDC: { address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", decimals: 6 },
       USDT: { address: "0xdAC17F958D2ee523a2206206994597C13D831ec7", decimals: 6 },
@@ -96,7 +96,7 @@ export const CHAINS = Object.freeze({
   polygon: {
     id: "polygon", name: "Polygon", family: "evm", symbol: "POL",
     decimals: 18, coinType: 60, purpose: 44, chainId: 137,
-    rpc: "https://polygon-rpc.com", explorer: "https://polygonscan.com",
+    rpc: "https://polygon-bor-rpc.publicnode.com", explorer: "https://polygonscan.com",
     stablecoins: {
       USDC: { address: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", decimals: 6 },
     },
@@ -104,7 +104,7 @@ export const CHAINS = Object.freeze({
   bnb: {
     id: "bnb", name: "BNB Smart Chain", family: "evm", symbol: "BNB",
     decimals: 18, coinType: 60, purpose: 44, chainId: 56,
-    rpc: "https://bsc-dataseed.binance.org", explorer: "https://bscscan.com",
+    rpc: "https://bsc-rpc.publicnode.com", explorer: "https://bscscan.com",
     stablecoins: {
       USDT: { address: "0x55d398326f99059fF775485246999027B3197955", decimals: 18 },
     },

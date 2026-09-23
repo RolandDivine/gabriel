@@ -19,6 +19,10 @@ export {
 } from "./addresses.js";
 export { Keyring } from "./keyring.js";
 export {
+  ERC20_TRANSFER_GAS, NATIVE_TRANSFER_GAS, gasPrice, transferCostUsd,
+  settlementViability, channelViability, surveyEvmFees,
+} from "./fees.js";
+export {
   ATTESTATION_VERSION, DEFAULT_TTL_SECONDS,
   canonicalize, canonicalBytes, buildAttestation, signAttestation,
   verifyAttestation, resolveAddress, AddressDirectory,
