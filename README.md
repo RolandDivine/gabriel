@@ -135,6 +135,46 @@ If you're in an ordinary Developer Command Prompt / Developer PowerShell
 cargo build --workspace
 ```
 
+
+### Building and running the desktop client
+
+The Tauri crate is excluded from the workspace (`Cargo.toml`'s
+`exclude`), so it builds from its own directory:
+
+```bash
+cd ui/gabriel-desktop/src-tauri
+cargo build --release
+```
+
+Run `target/release/gabriel-desktop.exe`. It needs WebView2, which ships
+with Windows 10/11.
+
+Build `--release` rather than `--debug` for anything you actually use:
+`windows_subsystem = "windows"` is behind `cfg_attr(not(debug_assertions))`,
+so a debug build opens a console window alongside the app. Worse, clicking
+that console puts it in QuickEdit selection mode, which blocks the process
+the next time it writes to stdout.
+
+Two things that look like bugs and aren't:
+
+- `Access is denied. (os error 5)` part-way through a release build is a
+  transient file lock, usually Defender scanning a `.rlib` as cargo writes
+  it. Run the build again; it completes.
+- Starting the app immediately after killing a previous instance can exit
+  101, because the old process still holds the discovery socket. Wait a
+  second and start it again.
+
+To run two nodes on one machine -- the quickest way to see discovery,
+messaging and the outbox actually work -- point the second one somewhere
+else:
+
+```bash
+GABRIEL_DATA_DIR=C:\gabriel-b GABRIEL_NAME=node-b gabriel-desktop.exe
+```
+
+Each instance gets its own identity key, database and mesh port (the mesh
+binds port 0 and announces whatever the OS assigned).
+
 **From Git Bash specifically**, two things bite:
 
 1. Git Bash ships its own `link.exe` (a coreutils hardlink tool, nothing to
