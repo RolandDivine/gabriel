@@ -1,0 +1,9 @@
+{
+  "name": "@gabriel/wallet-cli",
+  "version": "0.1.0",
+  "description": "CLI over @gabriel/wallet-core",
+  "type": "module",
+  "bin": { "gabriel-wallet": "src/index.js" },
+  "dependencies": { "@gabriel/wallet-core": "0.1.0" },
+  "license": "MIT"
+}

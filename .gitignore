@@ -26,3 +26,4 @@ taurirelease.cmd
 
 # npm / wallet workspace
 node_modules/
+package-lock.json

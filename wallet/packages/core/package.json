@@ -1,0 +1,14 @@
+{
+  "name": "@gabriel/wallet-core",
+  "version": "0.1.0",
+  "description": "Non-custodial multi-chain keyring, address derivation and mesh address attestations for Gabriel",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./chains": "./src/chains.js",
+    "./addresses": "./src/addresses.js",
+    "./attestation": "./src/attestation.js"
+  },
+  "license": "MIT"
+}
