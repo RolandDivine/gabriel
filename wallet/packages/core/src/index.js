@@ -27,3 +27,15 @@ export {
   canonicalize, canonicalBytes, buildAttestation, signAttestation,
   verifyAttestation, resolveAddress, AddressDirectory,
 } from "./attestation.js";
+
+// ---- EVM: transaction building, signing and broadcast ----
+export {
+  TX_TYPE_LEGACY, TX_TYPE_EIP1559, ERC20_TRANSFER_SELECTOR,
+  signTransaction, recoverAddress, decodeSigned, encodeErc20Transfer,
+  serializeUnsigned1559, serializeUnsignedLegacy,
+} from "./evm/transaction.js";
+export {
+  rpc, call, getNonce, getBalance, getTokenBalance, getFees, estimateGas,
+  prepareTransfer, broadcast, waitForReceipt, formatUnits, parseUnits,
+} from "./evm/provider.js";
+export * as rlp from "./evm/rlp.js";

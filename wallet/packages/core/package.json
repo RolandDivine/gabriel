@@ -9,7 +9,10 @@
     "./chains": "./src/chains.js",
     "./addresses": "./src/addresses.js",
     "./attestation": "./src/attestation.js",
-    "./fees": "./src/fees.js"
+    "./fees": "./src/fees.js",
+    "./evm": "./src/evm/transaction.js",
+    "./evm/provider": "./src/evm/provider.js",
+    "./evm/rlp": "./src/evm/rlp.js"
   },
   "license": "MIT"
 }

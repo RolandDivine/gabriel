@@ -17,6 +17,8 @@ import process from "node:process";
 
 import {
   Keyring, CHAINS, CHAIN_IDS, getChain,
+  getBalance, getTokenBalance, prepareTransfer, broadcast, waitForReceipt,
+  signTransaction, formatUnits, parseUnits, surveyEvmFees, settlementViability,
   buildAttestation, signAttestation, verifyAttestation, resolveAddress,
   isValidAddress, bytesToHex,
 } from "@gabriel/wallet-core";
@@ -179,15 +181,138 @@ const COMMANDS = {
     }
   },
 
+  async balance(args) {
+    const keyring = mnemonic();
+    const chainId = flag(args, "chain", "optimism");
+    const chain = getChain(chainId);
+    if (chain.family !== "evm") die(`balance currently supports EVM chains only; ${chain.name} is ${chain.family}`);
+    const address = keyring.address(chainId);
+
+    console.log(`${BOLD}${chain.name}${RESET}  ${DIM}${address}${RESET}\n`);
+    const native = await getBalance(chainId, address);
+    console.log(`  ${chain.symbol.padEnd(6)} ${formatUnits(native, chain.decimals)}`);
+
+    for (const [symbol, token] of Object.entries(chain.stablecoins ?? {})) {
+      try {
+        const bal = await getTokenBalance(chainId, token.address, address);
+        console.log(`  ${symbol.padEnd(6)} ${formatUnits(bal, token.decimals)}`);
+      } catch (err) {
+        console.log(`  ${symbol.padEnd(6)} ${DIM}unavailable: ${err.message}${RESET}`);
+      }
+    }
+  },
+
+  /**
+   * Builds and signs a transfer, prints exactly what it will do, and stops.
+   * Broadcasting is irreversible, so it needs --confirm as a separate,
+   * deliberate act rather than being the default.
+   */
+  async send(args) {
+    const keyring = mnemonic();
+    const chainId = flag(args, "chain", "optimism");
+    const chain = getChain(chainId);
+    if (chain.family !== "evm") die(`send currently supports EVM chains only; ${chain.name} is ${chain.family}`);
+
+    const to = flag(args, "to", null);
+    const amountText = flag(args, "amount", null);
+    const tokenSymbol = flag(args, "token", null);
+    if (!to || !amountText) die("usage: gabriel-wallet send --to <address> --amount <n> [--chain <id>] [--token USDC] [--confirm]");
+    if (!isValidAddress(to, chainId)) die(`"${to}" is not a valid ${chain.name} address`);
+
+    const token = tokenSymbol ? chain.stablecoins?.[tokenSymbol.toUpperCase()] : null;
+    if (tokenSymbol && !token) {
+      die(`${chain.name} has no ${tokenSymbol} in the registry (known: ${Object.keys(chain.stablecoins ?? {}).join(", ") || "none"})`);
+    }
+    const decimals = token ? token.decimals : chain.decimals;
+    const symbol = token ? tokenSymbol.toUpperCase() : chain.symbol;
+    const amount = parseUnits(amountText, decimals);
+
+    const account = keyring.deriveKey(chainId);
+    const from = keyring.address(chainId);
+
+    console.log(`${DIM}preparing on ${chain.name}...${RESET}`);
+    const tx = await prepareTransfer({
+      chainId, from, to, amount, token: token?.address,
+    });
+
+    const signed = signTransaction(tx, account.privateKey);
+    if (signed.from !== from) {
+      die(`refusing to continue: the signature recovers to ${signed.from}, not ${from}`);
+    }
+
+    console.log(`\n${BOLD}About to send${RESET}`);
+    console.log(`  ${formatUnits(amount, decimals)} ${symbol}`);
+    console.log(`  from  ${from}`);
+    console.log(`  to    ${to}`);
+    console.log(`  on    ${chain.name} ${DIM}(chain id ${chain.chainId})${RESET}`);
+    console.log(`  nonce ${tx.nonce}`);
+    console.log(`  max fee ${formatUnits(tx.meta.maxCostWei, chain.decimals)} ${chain.symbol}` +
+                ` ${DIM}(gas limit ${tx.gasLimit})${RESET}`);
+    console.log(`  hash  ${signed.hash}`);
+    console.log(`\n${DIM}signature recovers to ${signed.from} -- matches the sending account${RESET}`);
+
+    if (!args.includes("--confirm")) {
+      console.log(`\n${YELLOW}Not broadcast.${RESET} Re-run with ${BOLD}--confirm${RESET} to send it.`);
+      console.log(`${DIM}Nothing has left this machine. Broadcasting cannot be undone.${RESET}`);
+      return;
+    }
+
+    console.log(`\n${DIM}broadcasting...${RESET}`);
+    const { hash, explorer } = await broadcast(chainId, signed.raw);
+    console.log(`${GREEN}sent${RESET}  ${hash}`);
+    console.log(`${DIM}${explorer}${RESET}`);
+
+    const receipt = await waitForReceipt(chainId, hash, { timeoutMs: 90000 });
+    if (!receipt) {
+      console.log(`${DIM}still pending after 90s -- it is on chain, check the explorer${RESET}`);
+    } else if (receipt.succeeded) {
+      console.log(`${GREEN}confirmed${RESET} in block ${parseInt(receipt.blockNumber, 16)}, gas used ${receipt.gasUsed}`);
+    } else {
+      console.log(`${RED}reverted${RESET} -- the fee was still charged`);
+    }
+  },
+
+  async fees(args) {
+    const usdPerGb = Number(flag(args, "price", "0.10"));
+    const prices = {};
+    for (const pair of (flag(args, "prices", "ETH=2683.67,POL=0.126,BNB=766.42,AVAX=10.31")).split(",")) {
+      const [sym, val] = pair.split("=");
+      prices[sym] = Number(val);
+    }
+    console.log(`${BOLD}Settlement cost${RESET} ${DIM}at $${usdPerGb.toFixed(2)}/GB (a 100MB session is worth $${(usdPerGb / 10.24).toFixed(4)})${RESET}\n`);
+    const rows = await surveyEvmFees(prices);
+    console.log("  " + "chain".padEnd(20) + "fee".padEnd(12) + "% of a session".padEnd(18) + "settle per (1% cap)");
+    console.log("  " + "-".repeat(70));
+    for (const r of rows.sort((a, b) => (a.usd ?? 9) - (b.usd ?? 9))) {
+      if (r.error) { console.log("  " + r.name.padEnd(20) + DIM + r.error + RESET); continue; }
+      const v = settlementViability({ feeUsd: r.usd, usdPerGigabyte: usdPerGb });
+      console.log("  " + r.name.padEnd(20) +
+        ("$" + r.usd.toFixed(5)).padEnd(12) +
+        (((r.usd / (usdPerGb / 10.24)) * 100).toFixed(1) + "%").padEnd(18) +
+        (v.minGigabytes >= 1 ? v.minGigabytes.toFixed(1) + " GB" : v.minMegabytes.toFixed(0) + " MB"));
+    }
+    console.log(`\n${DIM}Measured live just now. Gas moves every block -- re-run before choosing a rail.${RESET}`);
+  },
+
   help() {
     console.log(`${BOLD}gabriel-wallet${RESET} -- non-custodial multi-chain wallet for Gabriel
 
-${BOLD}Commands${RESET}
+${BOLD}Wallet${RESET}
   new [--words 24]              Generate a recovery phrase
   addresses [--account N]       Show receive addresses on all 13 chains
              [--json]
   chains                        List the supported chains by family
   validate <address> <chain>    Check an address is well-formed for a chain
+
+${BOLD}Money (EVM chains)${RESET}
+  balance [--chain optimism]    Native + stablecoin balances
+  send --to <addr> --amount <n> Build and sign a transfer, then STOP.
+       [--chain optimism]       Prints what it will do; add --confirm to
+       [--token USDC]           actually broadcast it.
+       [--confirm]
+  fees [--price 0.10]           Measure live settlement cost per chain
+
+${BOLD}Mesh${RESET}
   attest [--identity <path>]    Sign "this Gabriel device receives here"
          [--chains a,b] [--out f]
   verify <file> [--chain <id>]  Verify a signed attestation
@@ -202,19 +327,28 @@ ${BOLD}What this is${RESET}
   two Gabriel users is an ordinary on-chain transfer between two addresses
   they each control.
 
-${BOLD}What is not built yet${RESET}
-  Transaction building and broadcast. This package derives, validates and
-  attests addresses; it does not yet sign a transfer. Signing a transaction
-  wrong loses money, so the send path lands per family with its own test
-  vectors rather than all at once.`);
+${BOLD}On sending${RESET}
+  \`send\` without --confirm signs nothing onto the network. It builds the
+  transaction, signs it locally, checks the signature recovers to your own
+  address, and shows you the amount, the fee and the hash. Broadcasting is
+  irreversible, so it is a separate, deliberate flag.
+
+${BOLD}Coverage${RESET}
+  Signing works on the 7 EVM chains. Bitcoin, Litecoin, Dogecoin, Solana,
+  Tron and Cosmos derive and validate addresses but cannot yet send --
+  each needs its own transaction format and its own test vectors, and
+  signing one wrong loses money irreversibly.`);
   },
 };
 
 const args = process.argv.slice(2);
 const command = args[0] ?? "help";
 const handler = COMMANDS[command] ?? COMMANDS.help;
+// await, not call: the network commands are async, and an un-awaited
+// rejection would surface as an unhandled promise warning with a stack
+// trace instead of the one-line error `die` prints.
 try {
-  handler(args);
+  await handler(args);
 } catch (err) {
   die(err.message);
 }
