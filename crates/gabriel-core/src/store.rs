@@ -207,6 +207,37 @@ impl Store {
             .execute("DELETE FROM mesh_outbox WHERE expires_at < ?1", params![now])?;
         Ok(removed)
     }
+
+    /// Row counts for every table in the local schema, name-ordered.
+    ///
+    /// The blueprint lists the local data model as a first-class piece of
+    /// the platform, but most of those tables have no write path yet (only
+    /// `mesh_outbox` does). The desktop client shows these counts rather
+    /// than pretending the empty ones are features -- an empty `contacts`
+    /// table is honest information about where the build actually is.
+    pub fn table_counts(&self) -> Result<Vec<(String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let names: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table'
+                   AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
+        let mut out = Vec::with_capacity(names.len());
+        for name in names {
+            // A table name can't be bound as a query parameter. These come
+            // from sqlite_master rather than from a caller, so they aren't
+            // attacker-controlled, but they're still quoted rather than
+            // interpolated bare.
+            let sql = format!("SELECT COUNT(*) FROM \"{name}\"");
+            let count: i64 = conn.query_row(&sql, [], |row| row.get(0))?;
+            out.push((name, count));
+        }
+        Ok(out)
+    }
 }
 
 fn to_array16(bytes: Vec<u8>) -> [u8; 16] {
@@ -286,4 +317,26 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
     }
+    /// The Storage screen reads this directly, so it has to name every
+    /// table the migration creates and count rows that actually exist.
+    #[test]
+    fn table_counts_covers_the_schema_and_tracks_writes() {
+        let store = Store::open_in_memory().unwrap();
+        let counts = store.table_counts().unwrap();
+
+        let names: Vec<&str> = counts.iter().map(|(n, _)| n.as_str()).collect();
+        for expected in [
+            "contacts", "devices", "gateway_sessions", "mesh_outbox", "messages",
+            "network_peers", "rooms", "routes", "sync_records", "users",
+        ] {
+            assert!(names.contains(&expected), "table_counts is missing {expected}: {names:?}");
+        }
+        assert!(counts.iter().all(|(_, rows)| *rows == 0), "a fresh store should be empty");
+
+        store.enqueue_outbound(&[5u8; 16], &[6u8; 32], b"queued", 100, 999_999).unwrap();
+        let counts = store.table_counts().unwrap();
+        let outbox = counts.iter().find(|(n, _)| n == "mesh_outbox").unwrap();
+        assert_eq!(outbox.1, 1, "the count should follow a real write");
+    }
+
 }

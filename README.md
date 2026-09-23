@@ -56,7 +56,27 @@ live run (not just "it compiles"):
   peer discovery), `fetch` (pull a URL through another device's
   gabriel-gatewayd, proving gateway sharing end-to-end), and `mesh` (run
   the router; optionally fire a one-off message with `--send-to`/
-  `--message`). No UI yet.
+  `--message`).
+- `ui/gabriel-desktop` -- the desktop client (Tauri v2 + WebView2, Rust
+  backend linking `gabriel-core` directly). Every CLI capability has a
+  screen, plus the parts of the core the CLI never grew a flag for:
+
+  | Screen    | Backs onto                                                  |
+  |-----------|-------------------------------------------------------------|
+  | Overview  | device identity, live counters, an honest built/not-built list |
+  | Network   | `discover`, plus the neighbour table and `--neighbor` by hand |
+  | Messages  | `mesh --send-to/--message`, one-to-one and to every peer     |
+  | Gateway   | `gabriel-gatewayd` (serve) and `fetch --via` (consume)       |
+  | Outbox    | the store-and-forward queue: retry now, prune, cancel        |
+  | Crypto    | the agility layer: Ed25519 and ML-DSA-44, sign and verify    |
+  | Identity  | sign/verify with the device key, the same check discovery runs |
+  | Protocol  | build and decode GNP packets with the real bincode codec     |
+  | Storage   | the local SQLite schema and which tables are actually written |
+  | Activity  | a live event log of peers, messages and gateway sessions     |
+
+  It is deliberately blunt about what is not built: messages are signed but
+  not encrypted, and the gateway has no admission policy. Both say so on
+  screen rather than only in this file.
 
 **Security hardening pass (first increment):** every parser that touches
 attacker-controlled bytes -- discovery's UDP handler, the gateway relay's

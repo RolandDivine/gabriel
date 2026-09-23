@@ -1,0 +1,22 @@
+[package]
+name = "gabriel-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "Gabriel desktop client -- Tauri shell over gabriel-core"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Linked directly -- Tauri is Rust, so no FFI/C ABI layer is needed here.
+# (crates/gabriel-ffi still exists for non-Rust consumers.)
+gabriel-core = { path = "../../../crates/gabriel-core" }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "io-util"] }
+# GNP packets are bincode-framed, same as every other Gabriel wire format --
+# the packet inspector builds and decodes them with the same codec the
+# protocol itself uses, not a lookalike.
+bincode = "1"
+anyhow = "1"

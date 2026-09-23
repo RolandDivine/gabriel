@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -127,9 +128,16 @@ impl PeerTable {
 /// Announces this device on the LAN and tracks other devices' announcements.
 pub struct DiscoveryService {
     identity: Arc<Identity>,
-    display_name: String,
+    /// Live-mutable: the desktop client lets a user rename the device
+    /// without tearing the node down, and the very next beacon carries the
+    /// new name. Held behind a Mutex rather than being a plain String for
+    /// exactly that reason.
+    display_name: Mutex<String>,
     gnp_port: u16,
-    offers_gateway: bool,
+    /// Live-mutable for the same reason: toggling gateway sharing in the
+    /// UI has to change what this device advertises immediately, or peers
+    /// would keep seeing a stale [gateway] tag until a restart.
+    offers_gateway: AtomicBool,
     peers: PeerTable,
 }
 
@@ -142,11 +150,38 @@ impl DiscoveryService {
     ) -> Self {
         Self {
             identity,
-            display_name,
+            display_name: Mutex::new(display_name),
             gnp_port,
-            offers_gateway,
+            offers_gateway: AtomicBool::new(offers_gateway),
             peers: PeerTable::default(),
         }
+    }
+
+    /// The name this device is currently announcing itself under.
+    pub fn display_name(&self) -> String {
+        self.display_name.lock().unwrap().clone()
+    }
+
+    /// Changes the announced name. Takes effect on the next beacon.
+    pub fn set_display_name(&self, name: String) {
+        *self.display_name.lock().unwrap() = name;
+    }
+
+    /// Whether this device is currently advertising gateway sharing.
+    pub fn offers_gateway(&self) -> bool {
+        self.offers_gateway.load(Ordering::Relaxed)
+    }
+
+    /// Starts or stops advertising gateway sharing. Only changes what this
+    /// device claims -- the caller is responsible for the relay actually
+    /// running (see `gateway::GatewayServer`).
+    pub fn set_offers_gateway(&self, offers: bool) {
+        self.offers_gateway.store(offers, Ordering::Relaxed);
+    }
+
+    /// The port this device announces as its mesh listener.
+    pub fn gnp_port(&self) -> u16 {
+        self.gnp_port
     }
 
     /// Current snapshot of discovered peers (never includes this device).
@@ -224,9 +259,9 @@ impl DiscoveryService {
         let timestamp_unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         let announcement = Announcement {
             device_id: self.identity.public_key(),
-            display_name: self.display_name.clone(),
+            display_name: self.display_name.lock().unwrap().clone(),
             gnp_port: self.gnp_port,
-            offers_gateway: self.offers_gateway,
+            offers_gateway: self.offers_gateway.load(Ordering::Relaxed),
             timestamp_unix,
         };
         let signature = self.identity.sign(&bincode::serialize(&announcement)?).to_vec();
@@ -375,4 +410,49 @@ mod tests {
         });
         assert!(completed, "parsing must not hang on a corrupted length prefix");
     }
+    /// The desktop client renames a device and toggles gateway sharing
+    /// while the node keeps running, so those two fields have to reach the
+    /// wire without a restart. This is the end-to-end version: peer B sees
+    /// A's *new* name and its [gateway] flag on a later beacon, having
+    /// first seen the old ones.
+    #[tokio::test]
+    async fn live_rename_and_gateway_toggle_reach_the_wire() {
+        let id_a = Arc::new(Identity::generate_ephemeral());
+        let id_b = Arc::new(Identity::generate_ephemeral());
+
+        let svc_a = Arc::new(DiscoveryService::new(id_a.clone(), "before".into(), 11010, false));
+        let svc_b = Arc::new(DiscoveryService::new(id_b.clone(), "observer".into(), 11011, false));
+        let _ha = svc_a.clone().spawn().expect("spawn a");
+        let _hb = svc_b.clone().spawn().expect("spawn b");
+
+        let sees = |name: &'static str, gateway: bool| {
+            let svc_b = svc_b.clone();
+            let key = id_a.public_key();
+            async move {
+                tokio::time::timeout(Duration::from_secs(20), async move {
+                    loop {
+                        if svc_b.peers().iter().any(|p| {
+                            p.device_id == key && p.display_name == name && p.offers_gateway == gateway
+                        }) {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                })
+                .await
+            }
+        };
+
+        sees("before", false).await.expect("B never saw A's original announcement");
+
+        svc_a.set_display_name("after".into());
+        svc_a.set_offers_gateway(true);
+        assert_eq!(svc_a.display_name(), "after");
+        assert!(svc_a.offers_gateway());
+
+        sees("after", true)
+            .await
+            .expect("B never saw the renamed, gateway-advertising A -- the change didn't reach the wire");
+    }
+
 }

@@ -286,7 +286,10 @@ fn start_node(data_dir: PathBuf, display_name: String) -> anyhow::Result<Gabriel
     // collide. The real port is then announced via discovery, which is
     // what other peers use to reach us.
     let mesh_addr = runtime.block_on(router.clone().listen("0.0.0.0:0".parse()?))?;
-    router.clone().spawn_retry_task();
+    // spawn_retry_task calls tokio::spawn internally, so it needs to run
+    // inside the runtime's context -- calling it bare panics with "there
+    // is no reactor running".
+    runtime.block_on(async { router.clone().spawn_retry_task() });
 
     let discovery = Arc::new(DiscoveryService::new(
         identity.clone(),

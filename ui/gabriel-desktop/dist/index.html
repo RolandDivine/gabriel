@@ -1,0 +1,1241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Gabriel</title>
+<style>
+  :root {
+    --bg: #12141a;
+    --panel: #1a1d25;
+    --panel-2: #21252e;
+    --panel-3: #272c37;
+    --line: #2e3440;
+    --text: #e8eaef;
+    --muted: #949cab;
+    --faint: #6b7382;
+    --accent: #4c8dff;
+    --accent-2: #22d3ee;
+    --ok: #3fbf74;
+    --warn: #e0a83c;
+    --bad: #e2585f;
+    --warn-bg: #352c18;
+    --warn-line: #6e5a22;
+    --warn-text: #efd79b;
+    --mono: Consolas, "Cascadia Mono", monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #eef0f4; --panel: #ffffff; --panel-2: #f5f6f9; --panel-3: #eceef3;
+      --line: #dde1e8; --text: #171a20; --muted: #5c6472; --faint: #838b99;
+      --accent: #2f6fe4; --accent-2: #0891b2; --ok: #16874b; --warn: #9a6f10;
+      --bad: #c33a41; --warn-bg: #fdf4da; --warn-line: #e2c266; --warn-text: #6a5310;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 13.5px/1.55 system-ui, "Segoe UI", sans-serif;
+    height: 100vh; display: flex; overflow: hidden;
+  }
+  button, input, select, textarea { font: inherit; color: inherit; }
+
+  /* ---------- sidebar ---------- */
+  nav {
+    width: 208px; flex: none; background: var(--panel); border-right: 1px solid var(--line);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 16px 14px 14px; }
+  .brand svg { width: 30px; height: 30px; flex: none; border-radius: 7px; }
+  .brand .name { font-size: 16px; font-weight: 650; letter-spacing: -0.2px; line-height: 1.1; }
+  .brand .sub { font-size: 10.5px; color: var(--faint); }
+  .navlist { flex: 1; overflow-y: auto; padding: 4px 8px; min-height: 0; }
+  .navitem {
+    display: flex; align-items: center; gap: 9px; width: 100%; text-align: left;
+    background: none; border: 0; border-radius: 7px; padding: 7px 9px; cursor: pointer;
+    color: var(--muted); margin-bottom: 1px;
+  }
+  .navitem:hover { background: var(--panel-2); color: var(--text); }
+  .navitem.on { background: var(--panel-3); color: var(--text); font-weight: 550; }
+  .navitem .ic { width: 15px; text-align: center; opacity: 0.85; flex: none; }
+  .navitem .badge {
+    margin-left: auto; font-size: 10.5px; font-family: var(--mono);
+    background: var(--panel-3); color: var(--muted); padding: 0 6px; border-radius: 9px;
+  }
+  .navitem.on .badge { background: var(--accent); color: #fff; }
+  .navfoot { border-top: 1px solid var(--line); padding: 10px 14px; font-size: 11px; color: var(--faint); }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; background: var(--faint); }
+  .dot.up { background: var(--ok); }
+  .dot.down { background: var(--bad); }
+
+  /* ---------- main ---------- */
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  header {
+    padding: 15px 22px 12px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: flex-end; gap: 14px; flex: none;
+  }
+  header h1 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -0.2px; }
+  header .blurb { color: var(--muted); font-size: 12px; margin-top: 2px; max-width: 70ch; }
+  header .right { margin-left: auto; display: flex; gap: 7px; align-items: center; flex: none; }
+  .page { flex: 1; overflow-y: auto; padding: 16px 22px 26px; min-height: 0; }
+  .page.hide { display: none; }
+
+  /* ---------- building blocks ---------- */
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px; margin-bottom: 14px;
+  }
+  .card > h2 {
+    margin: 0 0 3px; font-size: 12px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .card > .hint { color: var(--faint); font-size: 12px; margin: 0 0 12px; max-width: 78ch; }
+  .card > .hint:last-child { margin-bottom: 0; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+  @media (max-width: 980px) { .cols { grid-template-columns: 1fr; } }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(124px, 1fr)); gap: 10px; }
+  .stat { background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px; padding: 11px 13px; }
+  .stat .n { font-size: 21px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.5px; }
+  .stat .k { font-size: 11px; color: var(--muted); margin-top: 1px; }
+
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 5px 14px; align-items: baseline; }
+  .kv dt { color: var(--muted); font-size: 12px; }
+  .kv dd { margin: 0; font-family: var(--mono); font-size: 11.5px; word-break: break-all; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.4px;
+    color: var(--muted); font-weight: 600; padding: 6px 9px; border-bottom: 1px solid var(--line);
+  }
+  td { padding: 8px 9px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 12.5px; }
+  tr:last-child td { border-bottom: 0; }
+  tbody tr.pick { cursor: pointer; }
+  tbody tr.pick:hover { background: var(--panel-2); }
+  tbody tr.sel { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent); }
+  td.mono, .mono { font-family: var(--mono); font-size: 11.5px; }
+
+  .tag {
+    display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 20px;
+    border: 1px solid var(--line); color: var(--muted); margin-left: 5px; white-space: nowrap;
+  }
+  .tag.gw { color: var(--ok); border-color: var(--ok); }
+  .tag.no { color: var(--faint); }
+  .tag.nb { color: var(--accent); border-color: var(--accent); }
+  .tag.pq { color: var(--accent-2); border-color: var(--accent-2); }
+
+  label.f { display: block; margin-bottom: 10px; }
+  label.f > span { display: block; font-size: 11.5px; color: var(--muted); margin-bottom: 3px; }
+  input[type=text], input[type=number], select, textarea {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 7px; padding: 7px 10px; outline: none;
+  }
+  input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 62px; font-family: var(--mono); font-size: 11.5px; }
+  .row { display: flex; gap: 9px; align-items: flex-end; flex-wrap: wrap; }
+  .row > label.f { flex: 1; min-width: 130px; margin-bottom: 0; }
+  .row > .grow { flex: 1; min-width: 130px; }
+
+  button.b {
+    background: var(--accent); color: #fff; border: 0; border-radius: 7px;
+    padding: 7px 14px; font-weight: 550; cursor: pointer; white-space: nowrap;
+  }
+  button.b.ghost { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); font-weight: 450; }
+  button.b.danger { background: var(--bad); }
+  button.b.tiny { padding: 3px 9px; font-size: 11.5px; font-weight: 450; }
+  button.b:disabled { opacity: 0.42; cursor: default; }
+  button.b:not(:disabled):hover { filter: brightness(1.1); }
+
+  .empty { color: var(--faint); font-style: italic; padding: 14px 2px; font-size: 12.5px; }
+  .out {
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 12px; font-family: var(--mono); font-size: 11.5px;
+    white-space: pre-wrap; word-break: break-all; max-height: 330px; overflow: auto; margin-top: 10px;
+  }
+  .note { font-size: 12px; margin-top: 9px; }
+  .note.ok { color: var(--ok); }
+  .note.bad { color: var(--bad); }
+  .note.warn { color: var(--warn); }
+
+  .banner {
+    background: var(--warn-bg); border: 1px solid var(--warn-line); color: var(--warn-text);
+    border-radius: 8px; padding: 9px 12px; font-size: 12px; margin-bottom: 14px;
+  }
+  .banner b { font-weight: 650; }
+
+  /* messages */
+  .thread { max-height: 46vh; overflow-y: auto; padding-right: 4px; }
+  .msg { padding: 7px 0; border-bottom: 1px solid var(--line); }
+  .msg:last-child { border-bottom: 0; }
+  .msg .head { color: var(--muted); font-size: 11px; }
+  .msg .body { margin-top: 2px; white-space: pre-wrap; word-break: break-word; }
+  .msg.out .head::before { content: "\2192 "; color: var(--accent); }
+  .msg.in .head::before { content: "\2190 "; color: var(--ok); }
+
+  /* log */
+  .logline { display: flex; gap: 9px; padding: 3px 0; font-family: var(--mono); font-size: 11.5px; align-items: baseline; }
+  .logline .t { color: var(--faint); flex: none; }
+  .logline .l { flex: none; width: 42px; text-transform: uppercase; font-size: 10px; }
+  .logline.info .l { color: var(--accent); }
+  .logline.warn .l { color: var(--warn); }
+  .logline.error .l { color: var(--bad); }
+  .logline .m { word-break: break-word; }
+
+  #toast {
+    position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column;
+    gap: 7px; z-index: 50; pointer-events: none; max-width: 380px;
+  }
+  #toast div {
+    background: var(--panel-3); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+    border-radius: 7px; padding: 8px 13px; font-size: 12.5px; box-shadow: 0 6px 22px rgba(0,0,0,0.3);
+  }
+  #toast div.bad { border-left-color: var(--bad); }
+  #toast div.ok { border-left-color: var(--ok); }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="brand">
+    <svg viewBox="0 0 256 256" aria-hidden="true">
+      <defs>
+        <linearGradient id="gb" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#2a38a0"/><stop offset="1" stop-color="#22d3ee"/>
+        </linearGradient>
+      </defs>
+      <rect width="256" height="256" rx="56" fill="url(#gb)"/>
+      <g stroke="#fff" stroke-width="13" stroke-linecap="round" opacity="0.88">
+        <path d="M128 128 197 168M128 128 128 208M128 128 59 168M128 128 59 88M128 128 128 48M128 128 197 88"/>
+      </g>
+      <g fill="#fff">
+        <circle cx="197" cy="168" r="18"/><circle cx="128" cy="208" r="18"/>
+        <circle cx="59" cy="168" r="18"/><circle cx="59" cy="88" r="18"/>
+        <circle cx="128" cy="48" r="18"/><circle cx="197" cy="88" r="18"/>
+        <circle cx="128" cy="128" r="31"/>
+      </g>
+    </svg>
+    <div>
+      <div class="name">Gabriel</div>
+      <div class="sub" id="brandSub">adaptive mesh</div>
+    </div>
+  </div>
+  <div class="navlist" id="nav"></div>
+  <div class="navfoot">
+    <div><span class="dot" id="liveDot"></span><span id="liveText">starting…</span></div>
+    <div style="margin-top:3px" id="liveName"></div>
+  </div>
+</nav>
+
+<main>
+  <header>
+    <div>
+      <h1 id="pageTitle"></h1>
+      <div class="blurb" id="pageBlurb"></div>
+    </div>
+    <div class="right" id="pageActions"></div>
+  </header>
+
+  <div class="page hide" id="p-overview"></div>
+  <div class="page hide" id="p-network"></div>
+  <div class="page hide" id="p-messages"></div>
+  <div class="page hide" id="p-gateway"></div>
+  <div class="page hide" id="p-outbox"></div>
+  <div class="page hide" id="p-crypto"></div>
+  <div class="page hide" id="p-identity"></div>
+  <div class="page hide" id="p-protocol"></div>
+  <div class="page hide" id="p-storage"></div>
+  <div class="page hide" id="p-log"></div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const invoke = window.__TAURI__.core.invoke;
+const $ = (id) => document.getElementById(id);
+
+// ---------------------------------------------------------------------
+// tabs
+// ---------------------------------------------------------------------
+const TABS = [
+  { id: "overview", icon: "◉", label: "Overview",  title: "Overview",
+    blurb: "This device's identity, what it can see on the network, and what it's doing right now." },
+  { id: "network",  icon: "▦", label: "Network",   title: "Network",
+    blurb: "Peers discovered over signed UDP multicast, and the neighbour table the mesh router actually floods to." },
+  { id: "messages", icon: "✉", label: "Messages",  title: "Messages",
+    blurb: "Signed messages flooded across the mesh, with a hop-count TTL and duplicate suppression." },
+  { id: "gateway",  icon: "⇄", label: "Gateway",   title: "Gateway sharing",
+    blurb: "Share this device's internet connection with peers that have none, or route your own traffic through someone else's." },
+  { id: "outbox",   icon: "⧖", label: "Outbox",    title: "Store-and-forward outbox",
+    blurb: "Messages sent while no neighbour was reachable. Persisted in SQLite, so they survive a restart and go out when a peer appears." },
+  { id: "crypto",   icon: "⌘", label: "Crypto",    title: "Cryptographic agility",
+    blurb: "Two signature algorithms behind one tagged interface — classical Ed25519 and post-quantum ML-DSA-44." },
+  { id: "identity", icon: "⚿", label: "Identity",  title: "Device identity",
+    blurb: "The Ed25519 keypair that is this device's address on the mesh. Sign and verify with the same primitive discovery uses." },
+  { id: "protocol", icon: "☰", label: "Protocol",  title: "GNP packets",
+    blurb: "Build and decode Gabriel Network Protocol packets with the same bincode codec the wire formats use." },
+  { id: "storage",  icon: "⛃", label: "Storage",   title: "Local data store",
+    blurb: "The local-first SQLite schema, and how much of it this build actually writes to yet." },
+  { id: "log",      icon: "≡", label: "Activity",  title: "Activity log",
+    blurb: "What the node has been doing since it started — peers arriving, messages moving, gateway sessions." },
+];
+
+let tab = "overview";
+let status = null;
+let peers = [];
+let selectedPeer = null;
+
+function buildNav() {
+  const box = $("nav");
+  box.innerHTML = "";
+  for (const t of TABS) {
+    const b = document.createElement("button");
+    b.className = "navitem" + (t.id === tab ? " on" : "");
+    b.id = "nav-" + t.id;
+    const ic = document.createElement("span"); ic.className = "ic"; ic.textContent = t.icon;
+    const lb = document.createElement("span"); lb.textContent = t.label;
+    const bg = document.createElement("span"); bg.className = "badge"; bg.id = "badge-" + t.id; bg.style.display = "none";
+    b.append(ic, lb, bg);
+    b.onclick = () => show(t.id);
+    box.append(b);
+  }
+}
+
+function show(id) {
+  tab = id;
+  for (const t of TABS) {
+    $("p-" + t.id).classList.toggle("hide", t.id !== id);
+    $("nav-" + t.id).classList.toggle("on", t.id === id);
+  }
+  const t = TABS.find((x) => x.id === id);
+  $("pageTitle").textContent = t.title;
+  $("pageBlurb").textContent = t.blurb;
+  $("pageActions").innerHTML = "";
+  render(id);
+}
+
+function setBadge(id, n) {
+  const el = $("badge-" + id);
+  if (!el) return;
+  if (n > 0) { el.textContent = String(n); el.style.display = ""; }
+  else { el.style.display = "none"; }
+}
+
+// ---------------------------------------------------------------------
+// small helpers
+// ---------------------------------------------------------------------
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined && text !== null) e.textContent = text;   // textContent: peer-supplied strings are untrusted
+  return e;
+}
+function card(title, hint) {
+  const c = el("div", "card");
+  if (title) c.append(el("h2", null, title));
+  if (hint) c.append(el("p", "hint", hint));
+  return c;
+}
+function stat(n, k) {
+  const s = el("div", "stat");
+  s.append(el("div", "n", String(n)), el("div", "k", k));
+  return s;
+}
+function kv(pairs) {
+  const d = el("dl", "kv");
+  for (const [k, v] of pairs) { d.append(el("dt", null, k), el("dd", null, v)); }
+  return d;
+}
+function field(labelText, node) {
+  const l = el("label", "f");
+  l.append(el("span", null, labelText), node);
+  return l;
+}
+function input(id, placeholder, value) {
+  const i = document.createElement("input");
+  i.type = "text"; i.id = id; i.autocomplete = "off";
+  if (placeholder) i.placeholder = placeholder;
+  if (value !== undefined) i.value = value;
+  return i;
+}
+function select(id, options) {
+  const s = document.createElement("select"); s.id = id;
+  for (const o of options) {
+    const op = document.createElement("option");
+    op.value = o.value; op.textContent = o.label;
+    s.append(op);
+  }
+  return s;
+}
+function button(text, cls, onclick) {
+  const b = el("button", "b " + (cls || ""), text);
+  b.onclick = onclick;
+  return b;
+}
+function table(headers, rows) {
+  const t = document.createElement("table");
+  const thead = document.createElement("thead");
+  const hr = document.createElement("tr");
+  for (const h of headers) hr.append(el("th", null, h));
+  thead.append(hr);
+  const tb = document.createElement("tbody");
+  for (const r of rows) tb.append(r);
+  t.append(thead, tb);
+  return t;
+}
+const short = (id) => (id && id.length > 16 ? id.slice(0, 16) + "…" : id || "");
+const clock = (unix) => new Date(unix * 1000).toLocaleTimeString();
+function duration(secs) {
+  if (secs < 60) return secs + "s";
+  if (secs < 3600) return Math.floor(secs / 60) + "m " + (secs % 60) + "s";
+  return Math.floor(secs / 3600) + "h " + Math.floor((secs % 3600) / 60) + "m";
+}
+function toast(text, kind) {
+  const d = el("div", kind || "", text);
+  $("toast").append(d);
+  setTimeout(() => d.remove(), 4200);
+}
+function copy(text) {
+  navigator.clipboard.writeText(text).then(() => toast("Copied", "ok"), () => toast("Couldn't copy", "bad"));
+}
+function copyBtn(text) { return button("Copy", "ghost tiny", () => copy(text)); }
+
+// Remembers scroll + focus across a re-render, so the 1s poll doesn't
+// yank the page out from under someone reading or typing.
+function replace(pageId, build) {
+  const page = $(pageId);
+  const top = page.scrollTop;
+  const active = document.activeElement;
+  const keepId = active && active.id && page.contains(active) ? active.id : null;
+  const caret = keepId && active.selectionStart !== undefined ? active.selectionStart : null;
+  page.innerHTML = "";
+  build(page);
+  page.scrollTop = top;
+  if (keepId) {
+    const again = $(keepId);
+    if (again) { again.focus(); if (caret !== null && again.setSelectionRange) { try { again.setSelectionRange(caret, caret); } catch (e) {} } }
+  }
+}
+// Values typed into a form survive re-renders by living here, not in the DOM.
+const forms = {
+  neighborId: "", neighborAddr: "",
+  gwPort: "", fetchVia: "", fetchHost: "example.com", fetchPort: "80", fetchPath: "/",
+  cryptoAlgo: "Ed25519", cryptoKey: "", cryptoMsg: "hello agility",
+  vAlgoKey: "Ed25519", vKey: "", vMsg: "", vAlgoSig: "Ed25519", vSig: "",
+  idMsg: "gabriel discovery announcement", idKey: "", idVerifyMsg: "", idSig: "",
+  gnpType: "Messaging", gnpDest: "", gnpSeq: "1", gnpExp: "300", gnpPayload: "hello mesh", gnpHex: "",
+  compose: "", rename: "",
+};
+function bind(node, key) {
+  node.value = forms[key] || "";
+  node.oninput = () => { forms[key] = node.value; };
+  return node;
+}
+
+// ---------------------------------------------------------------------
+// live data
+// ---------------------------------------------------------------------
+let outbox = [], neighbors = [], history = [], logs = [], keys = [], tables = [];
+let lastResult = { fetch: null, sign: null, verify: null, gnp: null, idSign: null, idVerify: null };
+
+async function refresh() {
+  try {
+    status = await invoke("node_status");
+  } catch (err) {
+    $("liveText").textContent = "UI can't reach the node";
+    $("liveDot").className = "dot down";
+    return;
+  }
+
+  $("liveDot").className = "dot " + (status.running ? "up" : "down");
+  $("liveText").textContent = status.running
+    ? "node up · " + duration(status.uptime_secs)
+    : "node stopped";
+  $("liveName").textContent = status.display_name || "";
+  $("brandSub").textContent = "v" + status.version;
+  setBadge("network", status.peer_count);
+  setBadge("outbox", status.outbox_count);
+
+  if (status.running) {
+    peers = await invoke("list_peers");
+    if (selectedPeer && !peers.some((p) => p.device_id === selectedPeer)) selectedPeer = null;
+    const fresh = await invoke("poll_inbox");
+    if (fresh.length) {
+      history = history.concat(fresh);
+      if (tab !== "messages") setBadge("messages", (history.filter((m) => m.direction === "in").length));
+      toast(fresh.length + " message" + (fresh.length === 1 ? "" : "s") + " received", "ok");
+    }
+    if (tab === "network") neighbors = await invoke("list_neighbors");
+    if (tab === "outbox") { try { outbox = await invoke("list_outbox"); } catch (e) { outbox = []; } }
+    if (tab === "storage") { try { tables = await invoke("table_counts"); } catch (e) { tables = []; } }
+    if (tab === "crypto") keys = await invoke("crypto_list_keys");
+  }
+  if (tab === "log") logs = await invoke("event_log");
+
+  render(tab);
+}
+
+function render(which) {
+  if (which === "overview") return renderOverview();
+  if (which === "network") return renderNetwork();
+  if (which === "messages") return renderMessages();
+  if (which === "gateway") return renderGateway();
+  if (which === "outbox") return renderOutbox();
+  if (which === "crypto") return renderCrypto();
+  if (which === "identity") return renderIdentity();
+  if (which === "protocol") return renderProtocol();
+  if (which === "storage") return renderStorage();
+  if (which === "log") return renderLog();
+}
+
+function notRunning(page) {
+  const c = card("Node is not running");
+  c.append(el("p", "hint", status && status.error ? status.error : "The mesh node failed to start, so nothing on this screen has anything to talk to."));
+  c.append(button("Try starting it again", "", async () => {
+    try { await invoke("restart_node"); toast("Node restarted", "ok"); } catch (e) { toast(String(e), "bad"); }
+  }));
+  page.append(c);
+}
+
+// ---------------------------------------------------------------------
+// Overview
+// ---------------------------------------------------------------------
+function renderOverview() {
+  replace("p-overview", (page) => {
+    if (!status) return;
+    if (!status.running) return notRunning(page);
+
+    const s = card(null, null);
+    const grid = el("div", "stats");
+    grid.append(
+      stat(status.peer_count, "peers seen"),
+      stat(status.routable_peer_count, "routable"),
+      stat(status.neighbor_count, "neighbours"),
+      stat(status.gateway_peer_count, "gateways nearby"),
+      stat(status.outbox_count, "queued"),
+      stat(duration(status.uptime_secs), "uptime"),
+    );
+    s.append(grid);
+    page.append(s);
+
+    const cols = el("div", "cols");
+
+    const idc = card("This device");
+    const nameRow = el("div", "row");
+    const nameIn = bind(input("renameInput", status.display_name), "rename");
+    if (!forms.rename) { nameIn.value = status.display_name; }
+    nameRow.append(field("Name other peers see", nameIn));
+    nameRow.append(button("Rename", "ghost", async () => {
+      try {
+        await invoke("set_display_name", { name: $("renameInput").value });
+        forms.rename = "";
+        toast("Renamed — the next beacon carries it", "ok");
+      } catch (e) { toast(String(e), "bad"); }
+    }));
+    idc.append(nameRow);
+    idc.append(el("div", null, ""));
+    idc.append(kv([["Device id", status.device_id]]));
+    const idActions = el("div", "row");
+    idActions.style.marginTop = "9px";
+    idActions.append(copyBtn(status.device_id));
+    idc.append(idActions);
+    cols.append(idc);
+
+    const nc = card("Node");
+    nc.append(kv([
+      ["Mesh listener", status.mesh_addr],
+      ["Discovery group", status.discovery_group],
+      ["Gateway sharing", status.gateway_sharing ? "on · " + status.gateway_addr : "off"],
+      ["Data directory", status.data_dir],
+      ["Identity key", status.identity_path],
+      ["Database", status.store_path],
+    ]));
+    const acts = el("div", "row");
+    acts.style.marginTop = "11px";
+    acts.append(button("Restart node", "ghost", async () => {
+      try { await invoke("restart_node"); toast("Node restarted", "ok"); } catch (e) { toast(String(e), "bad"); }
+    }));
+    acts.append(button(status.gateway_sharing ? "Stop sharing internet" : "Share internet", "ghost", async () => {
+      try {
+        if (status.gateway_sharing) { await invoke("stop_gateway"); toast("Gateway sharing stopped"); }
+        else { const a = await invoke("start_gateway", { port: status.default_gateway_port }); toast("Sharing on " + a, "ok"); }
+      } catch (e) { toast(String(e), "bad"); }
+    }));
+    nc.append(acts);
+    cols.append(nc);
+
+    page.append(cols);
+
+    const what = card("What this build can actually do",
+      "Every item here is wired to working code in gabriel-core, and every one has a screen in this app. Gaps are listed as gaps rather than hidden.");
+    const rows = [
+      ["Signed LAN discovery", "working", "UDP multicast beacons, Ed25519-signed and verified before a peer is trusted."],
+      ["Multi-hop mesh routing", "working", "Signed message flooding with a hop-count TTL and duplicate suppression."],
+      ["Store-and-forward", "working", "Undeliverable messages persist to SQLite and retry when a neighbour appears."],
+      ["Gateway sharing", "working", "An authenticated TCP relay, with replay rejection and a concurrency cap."],
+      ["Crypto agility", "working", "Ed25519 and ML-DSA-44 behind one tagged verify() call."],
+      ["End-to-end encryption", "not built", "Messages are signed, not encrypted. MLS is the plan; it isn't here yet."],
+      ["Gateway admission policy", "not built", "Any device with a keypair can ask to relay through a gateway."],
+      ["GACL path scoring", "not built", "No adaptive Wi-Fi/Ethernet/mobile path selection yet."],
+    ];
+    const trs = rows.map(([name, state, why]) => {
+      const tr = document.createElement("tr");
+      tr.append(el("td", null, name));
+      const td = el("td");
+      const tg = el("span", "tag " + (state === "working" ? "gw" : "no"), state);
+      tg.style.marginLeft = "0";
+      td.append(tg);
+      tr.append(td);
+      tr.append(el("td", null, why));
+      return tr;
+    });
+    what.append(table(["Capability", "State", "Detail"], trs));
+    page.append(what);
+  });
+}
+
+// ---------------------------------------------------------------------
+// Network
+// ---------------------------------------------------------------------
+function renderNetwork() {
+  replace("p-network", (page) => {
+    if (!status) return;
+    if (!status.running) return notRunning(page);
+
+    const pc = card("Peers on this network",
+      "Anything announcing itself on " + status.discovery_group + " with a signature that checks out. A peer advertising mesh port 0 is running discovery only — there is nowhere to route a message to it.");
+    if (peers.length === 0) {
+      pc.append(el("div", "empty", "No other devices yet. Start Gabriel (or gabriel-gatewayd) on another machine on this network."));
+    } else {
+      const rows = peers.map((p) => {
+        const tr = document.createElement("tr");
+        const name = el("td");
+        name.append(el("span", null, p.display_name));
+        if (p.offers_gateway) name.append(el("span", "tag gw", "gateway"));
+        if (p.is_neighbor) name.append(el("span", "tag nb", "neighbour"));
+        if (!p.routable) name.append(el("span", "tag no", "discovery only"));
+        tr.append(name);
+        tr.append(el("td", "mono", short(p.device_id)));
+        tr.append(el("td", "mono", p.source_addr));
+        tr.append(el("td", "mono", p.mesh_addr || "—"));
+        tr.append(el("td", "mono", p.last_seen_secs.toFixed(1) + "s"));
+        const act = el("td");
+        const b = button("Message", "ghost tiny", () => { selectedPeer = p.device_id; show("messages"); });
+        b.disabled = !p.routable;
+        act.append(b);
+        act.append(copyBtn(p.device_id));
+        tr.append(act);
+        return tr;
+      });
+      pc.append(table(["Device", "Id", "Seen from", "Mesh address", "Last seen", ""], rows));
+    }
+    page.append(pc);
+
+    const nc = card("Neighbour table",
+      "What the mesh router actually floods to. Discovery fills this automatically every two seconds; you can also add a neighbour by hand, which is the only way to build a real multi-hop path on one LAN segment — multicast makes every local node a direct neighbour of every other.");
+    if (neighbors.length === 0) {
+      nc.append(el("div", "empty", "No neighbours. Messages you send will queue in the outbox until one appears."));
+    } else {
+      const rows = neighbors.map((n) => {
+        const tr = document.createElement("tr");
+        tr.append(el("td", null, n.display_name || "—"));
+        tr.append(el("td", "mono", short(n.device_id)));
+        tr.append(el("td", "mono", n.address));
+        const o = el("td");
+        o.append(el("span", "tag " + (n.origin === "manual" ? "nb" : "no"), n.origin));
+        tr.append(o);
+        const act = el("td");
+        act.append(button("Remove", "ghost tiny", async () => {
+          try { await invoke("remove_neighbor", { deviceId: n.device_id }); toast("Removed"); }
+          catch (e) { toast(String(e), "bad"); }
+        }));
+        tr.append(act);
+        return tr;
+      });
+      nc.append(table(["Name", "Device id", "Address", "Origin", ""], rows));
+    }
+
+    const addRow = el("div", "row");
+    addRow.style.marginTop = "12px";
+    addRow.append(field("Device id (64 hex characters)", bind(input("nbId", "3f9a…"), "neighborId")));
+    addRow.append(field("Address", bind(input("nbAddr", "192.168.1.5:42426"), "neighborAddr")));
+    addRow.append(button("Add neighbour", "", async () => {
+      try {
+        await invoke("add_neighbor", { deviceId: forms.neighborId, address: forms.neighborAddr });
+        forms.neighborId = ""; forms.neighborAddr = "";
+        toast("Neighbour added", "ok");
+      } catch (e) { toast(String(e), "bad"); }
+    }));
+    nc.append(addRow);
+    page.append(nc);
+  });
+}
+
+// ---------------------------------------------------------------------
+// Messages
+// ---------------------------------------------------------------------
+function renderMessages() {
+  setBadge("messages", 0);
+  replace("p-messages", (page) => {
+    if (!status) return;
+    if (!status.running) return notRunning(page);
+
+    const b = el("div", "banner");
+    b.append(el("b", null, "Messages are signed, not encrypted."));
+    b.append(document.createTextNode(" A recipient can verify who sent a message and that nobody altered it, but the text is readable by every device that relays it. End-to-end encryption is not implemented — don't send anything sensitive."));
+    page.append(b);
+
+    const routable = peers.filter((p) => p.routable);
+    const c = card("Send");
+    if (routable.length === 0) {
+      c.append(el("div", "empty", "No routable peers right now. Anything you send will be queued in the outbox and retried automatically."));
+    }
+
+    const opts = [{ value: "", label: routable.length ? "Choose a device…" : "No routable devices" }]
+      .concat(routable.map((p) => ({ value: p.device_id, label: p.display_name + "  ·  " + short(p.device_id) })));
+    const sel = select("msgTo", opts);
+    sel.value = selectedPeer || "";
+    sel.onchange = () => { selectedPeer = sel.value || null; };
+    c.append(field("To", sel));
+
+    const ta = document.createElement("textarea");
+    ta.id = "msgText";
+    ta.placeholder = "Message text";
+    bind(ta, "compose");
+    c.append(field("Message", ta));
+
+    const acts = el("div", "row");
+    const sendBtn = button("Send", "", async () => {
+      const to = $("msgTo").value;
+      const text = forms.compose.trim();
+      if (!to) return toast("Pick a device first", "bad");
+      if (!text) return toast("Nothing to send", "bad");
+      try {
+        const r = await invoke("send_message", { destination: to, text });
+        forms.compose = "";
+        toast(r.reached > 0 ? "Sent to " + r.reached + " neighbour(s)" : "Queued — no neighbour reachable", r.reached > 0 ? "ok" : "");
+      } catch (e) { toast(String(e), "bad"); }
+    });
+    acts.append(sendBtn);
+    const bc = button("Send to all routable peers", "ghost", async () => {
+      const text = forms.compose.trim();
+      if (!text) return toast("Nothing to send", "bad");
+      try {
+        const r = await invoke("broadcast_message", { text });
+        forms.compose = "";
+        toast("Sent to " + r.reached + " of " + r.targets + " peer(s); " + r.queued + " queued", "ok");
+      } catch (e) { toast(String(e), "bad"); }
+    });
+    bc.disabled = routable.length === 0;
+    acts.append(bc);
+    c.append(acts);
+    page.append(c);
+
+    const t = card("Transcript", "Kept in memory for this session. Sent and received messages both appear here.");
+    if (history.length === 0) {
+      t.append(el("div", "empty", "Nothing sent or received yet."));
+    } else {
+      const thread = el("div", "thread");
+      for (const m of history) {
+        const d = el("div", "msg " + m.direction);
+        const arrow = m.direction === "out" ? "to " : "from ";
+        d.append(el("div", "head", clock(m.ts_unix) + "  ·  " + arrow + m.peer + (m.note ? "  ·  " + m.note : "")));
+        d.append(el("div", "body", m.text));
+        thread.append(d);
+      }
+      t.append(thread);
+      t.append(button("Clear transcript", "ghost tiny", async () => {
+        await invoke("clear_history"); history = []; render("messages");
+      }));
+      setTimeout(() => { const th = document.querySelector("#p-messages .thread"); if (th) th.scrollTop = th.scrollHeight; }, 0);
+    }
+    page.append(t);
+  });
+}
+
+// ---------------------------------------------------------------------
+// Gateway
+// ---------------------------------------------------------------------
+function renderGateway() {
+  replace("p-gateway", (page) => {
+    if (!status) return;
+    if (!status.running) return notRunning(page);
+
+    const cols = el("div", "cols");
+
+    const share = card("Share this device's connection",
+      "Runs the relay that gabriel-gatewayd runs: a peer proves it controls a Gabriel identity, names a host and port, and this device pipes bytes between them. While it's on, your discovery beacon advertises [gateway] so peers can find you.");
+    if (status.gateway_sharing) {
+      share.append(kv([["Listening on", status.gateway_addr], ["Running for", duration(status.gateway_uptime_secs)]]));
+      const r = el("div", "row"); r.style.marginTop = "11px";
+      r.append(button("Stop sharing", "danger", async () => {
+        try { await invoke("stop_gateway"); toast("Stopped"); } catch (e) { toast(String(e), "bad"); }
+      }));
+      share.append(r);
+    } else {
+      const r = el("div", "row");
+      const p = input("gwPort", String(status.default_gateway_port), forms.gwPort || String(status.default_gateway_port));
+      p.oninput = () => { forms.gwPort = p.value; };
+      r.append(field("Port (0 lets Windows pick one)", p));
+      r.append(button("Start sharing", "", async () => {
+        const port = parseInt($("gwPort").value, 10);
+        if (isNaN(port) || port < 0 || port > 65535) return toast("Port must be 0–65535", "bad");
+        try { const a = await invoke("start_gateway", { port }); toast("Sharing on " + a, "ok"); }
+        catch (e) { toast(String(e), "bad"); }
+      }));
+      share.append(r);
+    }
+    const warn = el("div", "banner"); warn.style.marginTop = "12px"; warn.style.marginBottom = "0";
+    warn.append(el("b", null, "There is no admission policy yet."));
+    warn.append(document.createTextNode(" Any device that can generate a keypair can ask to relay through this gateway. Replayed requests are rejected and concurrent sessions are capped at 256, but nothing decides who is allowed. Only turn this on for a network you trust."));
+    share.append(warn);
+    cols.append(share);
+
+    const gws = peers.filter((p) => p.offers_gateway);
+    const use = card("Route through a peer's gateway",
+      "Opens an authenticated tunnel to a gateway and sends an HTTP request down it. This device never resolves or connects to the target itself — that is the whole point of the relay.");
+
+    const viaOpts = [{ value: "", label: gws.length ? "Choose a gateway…" : "None advertising — type an address below" }]
+      .concat(gws.map((p) => ({
+        value: p.address + ":" + status.default_gateway_port,
+        label: p.display_name + "  ·  " + p.address + ":" + status.default_gateway_port,
+      })));
+    const viaSel = select("fetchViaSel", viaOpts);
+    viaSel.onchange = () => { forms.fetchVia = viaSel.value; const f = $("fetchVia"); if (f) f.value = viaSel.value; };
+    use.append(field("Gateway advertising on this network", viaSel));
+    use.append(field("Gateway address", bind(input("fetchVia", "192.168.1.5:42425"), "fetchVia")));
+
+    const r2 = el("div", "row");
+    r2.append(field("Host", bind(input("fetchHost", "example.com"), "fetchHost")));
+    r2.append(field("Port", bind(input("fetchPort", "80"), "fetchPort")));
+    use.append(r2);
+    use.append(field("Path", bind(input("fetchPath", "/"), "fetchPath")));
+
+    const fb = button("Fetch through gateway", "", async () => {
+      const port = parseInt(forms.fetchPort, 10);
+      if (isNaN(port)) return toast("Port must be a number", "bad");
+      fb.disabled = true; fb.textContent = "Fetching…";
+      try {
+        lastResult.fetch = { ok: await invoke("gateway_fetch", {
+          gatewayAddr: forms.fetchVia, host: forms.fetchHost, port, path: forms.fetchPath }) };
+        toast("Response received", "ok");
+      } catch (e) {
+        lastResult.fetch = { err: String(e) };
+        toast(String(e), "bad");
+      }
+      render("gateway");
+    });
+    use.append(fb);
+
+    if (lastResult.fetch) {
+      if (lastResult.fetch.err) {
+        use.append(el("div", "note bad", lastResult.fetch.err));
+      } else {
+        const f = lastResult.fetch.ok;
+        use.append(el("div", "note ok",
+          f.total_bytes + " bytes in " + f.elapsed_ms + "ms, relayed by " + f.via + (f.truncated ? " (display truncated)" : "")));
+        const body = [f.status_line].concat(f.headers).join("\n") + "\n\n" + f.body;
+        use.append(el("pre", "out", body));
+      }
+    }
+    cols.append(use);
+
+    page.append(cols);
+
+    const note = card("Non-goals this build keeps",
+      "Recorded in the blueprint and the README, and load-bearing rather than decorative: no base-station spoofing, no carrier billing bypass, no unauthorised satellite access, no spectrum impersonation, no payment-system circumvention, and no message-content telemetry by default.");
+    page.append(note);
+  });
+}
+
+// ---------------------------------------------------------------------
+// Outbox
+// ---------------------------------------------------------------------
+function renderOutbox() {
+  replace("p-outbox", (page) => {
+    if (!status) return;
+    if (!status.running) return notRunning(page);
+
+    const c = card("Queued messages",
+      "A message sent with no reachable neighbour is signed, persisted here, and re-signed with a fresh timestamp on every retry — same message id, new envelope, so the receiver's freshness check still passes. The background retry runs on its own; these buttons just do it now.");
+
+    const acts = el("div", "row");
+    acts.style.marginBottom = "12px";
+    acts.append(button("Retry now", "", async () => {
+      try { const n = await invoke("retry_outbox"); toast(n > 0 ? n + " message(s) went out" : "Still nothing reachable", n > 0 ? "ok" : ""); }
+      catch (e) { toast(String(e), "bad"); }
+    }));
+    acts.append(button("Prune expired", "ghost", async () => {
+      try { const n = await invoke("prune_outbox"); toast("Removed " + n + " expired"); }
+      catch (e) { toast(String(e), "bad"); }
+    }));
+    c.append(acts);
+
+    if (outbox.length === 0) {
+      c.append(el("div", "empty", "Outbox is empty — nothing is waiting for a neighbour."));
+    } else {
+      const rows = outbox.map((m) => {
+        const tr = document.createElement("tr");
+        tr.append(el("td", null, m.body));
+        tr.append(el("td", null, m.destination_name || short(m.destination_id)));
+        tr.append(el("td", "mono", String(m.attempts)));
+        tr.append(el("td", "mono", m.expires_in_secs > 0 ? duration(m.expires_in_secs) : "expired"));
+        const act = el("td");
+        act.append(button("Cancel", "ghost tiny", async () => {
+          try { await invoke("cancel_outbound", { messageId: m.message_id }); toast("Cancelled"); }
+          catch (e) { toast(String(e), "bad"); }
+        }));
+        tr.append(act);
+        return tr;
+      });
+      c.append(table(["Message", "To", "Attempts", "Expires in", ""], rows));
+    }
+    page.append(c);
+  });
+}
+
+// ---------------------------------------------------------------------
+// Crypto
+// ---------------------------------------------------------------------
+let algorithms = [];
+function renderCrypto() {
+  replace("p-crypto", (page) => {
+    const a = card("Algorithms",
+      "One verify() call site dispatches on the algorithm tag carried by both the key and the signature. A mismatched pairing fails closed rather than guessing which side to trust.");
+    const rows = algorithms.map((alg) => {
+      const tr = document.createElement("tr");
+      const n = el("td");
+      n.append(el("span", null, alg.label));
+      if (alg.post_quantum) n.append(el("span", "tag pq", "post-quantum"));
+      tr.append(n);
+      tr.append(el("td", "mono", alg.public_key_bytes + " B"));
+      tr.append(el("td", "mono", alg.signature_bytes + " B"));
+      tr.append(el("td", null, alg.note));
+      return tr;
+    });
+    a.append(table(["Algorithm", "Public key", "Signature", "Notes"], rows));
+    page.append(a);
+
+    const cols = el("div", "cols");
+
+    const g = card("Keys", "Generated in memory for this session only. Private key material never leaves the Rust side — only public keys and signatures cross into this window.");
+    const gr = el("div", "row");
+    const algSel = select("genAlgo", algorithms.map((x) => ({ value: x.id, label: x.label })));
+    algSel.value = forms.cryptoAlgo;
+    algSel.onchange = () => { forms.cryptoAlgo = algSel.value; };
+    gr.append(field("Algorithm", algSel));
+    gr.append(button("Generate keypair", "", async () => {
+      try {
+        const k = await invoke("crypto_generate", { algorithm: forms.cryptoAlgo });
+        forms.cryptoKey = k.key_id;
+        keys = await invoke("crypto_list_keys");
+        toast("Generated " + k.key_id + " (" + k.public_key_bytes + " byte public key)", "ok");
+        render("crypto");
+      } catch (e) { toast(String(e), "bad"); }
+    }));
+    g.append(gr);
+
+    if (keys.length === 0) {
+      g.append(el("div", "empty", "No keys yet."));
+    } else {
+      const krows = keys.map((k) => {
+        const tr = document.createElement("tr");
+        tr.append(el("td", "mono", k.key_id));
+        tr.append(el("td", null, k.algorithm));
+        tr.append(el("td", "mono", k.public_key_bytes + " B"));
+        tr.append(el("td", "mono", short(k.public_key)));
+        const act = el("td");
+        act.append(copyBtn(k.public_key));
+        act.append(button("Delete", "ghost tiny", async () => {
+          await invoke("crypto_delete_key", { keyId: k.key_id });
+          keys = await invoke("crypto_list_keys"); render("crypto");
+        }));
+        tr.append(act);
+        return tr;
+      });
+      g.append(table(["Key", "Algorithm", "Public key", "Value", ""], krows));
+    }
+    cols.append(g);
+
+    const s = card("Sign");
+    const keyOpts = keys.length
+      ? keys.map((k) => ({ value: k.key_id, label: k.key_id + "  ·  " + k.algorithm }))
+      : [{ value: "", label: "Generate a key first" }];
+    const ks = select("signKey", keyOpts);
+    ks.value = forms.cryptoKey;
+    ks.onchange = () => { forms.cryptoKey = ks.value; };
+    s.append(field("Key", ks));
+    s.append(field("Message", bind(input("signMsg", "hello agility"), "cryptoMsg")));
+    const sb = button("Sign", "", async () => {
+      try {
+        const r = await invoke("crypto_sign", { keyId: forms.cryptoKey, message: forms.cryptoMsg });
+        lastResult.sign = { ok: r };
+        // Prefill the verify form, so checking the signature is one click.
+        forms.vAlgoKey = r.algorithm; forms.vAlgoSig = r.algorithm;
+        forms.vKey = r.public_key; forms.vSig = r.signature; forms.vMsg = forms.cryptoMsg;
+        toast("Signed — " + r.signature_bytes + " bytes", "ok");
+      } catch (e) { lastResult.sign = { err: String(e) }; toast(String(e), "bad"); }
+      render("crypto");
+    });
+    sb.disabled = keys.length === 0;
+    s.append(sb);
+    if (lastResult.sign) {
+      if (lastResult.sign.err) s.append(el("div", "note bad", lastResult.sign.err));
+      else {
+        s.append(el("div", "note ok", lastResult.sign.ok.algorithm + " signature, " + lastResult.sign.ok.signature_bytes + " bytes"));
+        s.append(el("pre", "out", lastResult.sign.ok.signature));
+      }
+    }
+    cols.append(s);
+    page.append(cols);
+
+    const v = card("Verify",
+      "Signing above prefills this. Change the algorithm on one side only, and it fails — that is the agility layer failing closed, not a bug.");
+    const vr = el("div", "row");
+    const vka = select("vKeyAlgo", algorithms.map((x) => ({ value: x.id, label: x.label })));
+    vka.value = forms.vAlgoKey; vka.onchange = () => { forms.vAlgoKey = vka.value; };
+    vr.append(field("Key algorithm", vka));
+    const vsa = select("vSigAlgo", algorithms.map((x) => ({ value: x.id, label: x.label })));
+    vsa.value = forms.vAlgoSig; vsa.onchange = () => { forms.vAlgoSig = vsa.value; };
+    vr.append(field("Signature algorithm", vsa));
+    v.append(vr);
+    const vk = document.createElement("textarea"); vk.id = "vKey"; bind(vk, "vKey");
+    v.append(field("Public key (hex)", vk));
+    v.append(field("Message", bind(input("vMsg", ""), "vMsg")));
+    const vs = document.createElement("textarea"); vs.id = "vSig"; bind(vs, "vSig");
+    v.append(field("Signature (hex)", vs));
+    v.append(button("Verify", "", async () => {
+      try {
+        const ok = await invoke("crypto_verify", {
+          keyAlgorithm: forms.vAlgoKey, publicKey: forms.vKey, message: forms.vMsg,
+          signatureAlgorithm: forms.vAlgoSig, signature: forms.vSig });
+        lastResult.verify = { ok };
+      } catch (e) { lastResult.verify = { err: String(e) }; }
+      render("crypto");
+    }));
+    if (lastResult.verify) {
+      if (lastResult.verify.err) v.append(el("div", "note bad", lastResult.verify.err));
+      else v.append(el("div", "note " + (lastResult.verify.ok ? "ok" : "bad"),
+        lastResult.verify.ok ? "Signature is valid." : "Signature did NOT verify."));
+    }
+    page.append(v);
+  });
+}
+
+// ---------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------
+function renderIdentity() {
+  replace("p-identity", (page) => {
+    if (!status) return;
+    if (!status.running) return notRunning(page);
+
+    const c = card("This device's key",
+      "An Ed25519 keypair loaded from disk at startup. The public half is this device's address on the mesh — what peers call a device id. The private half is stored as raw bytes today; moving it behind Windows CNG/TPM so it can never be exported is a planned change that does not alter this screen.");
+    c.append(kv([
+      ["Device id", status.device_id],
+      ["Key file", status.identity_path],
+      ["Algorithm", "Ed25519 · 32 byte public key · 64 byte signature"],
+    ]));
+    const r = el("div", "row"); r.style.marginTop = "10px";
+    r.append(copyBtn(status.device_id));
+    c.append(r);
+    page.append(c);
+
+    const cols = el("div", "cols");
+
+    const s = card("Sign with this device", "Uses the same key and the same primitive that signs every discovery beacon and mesh message.");
+    s.append(field("Message", bind(input("idMsg", ""), "idMsg")));
+    s.append(button("Sign", "", async () => {
+      try {
+        const sig = await invoke("identity_sign", { message: forms.idMsg });
+        lastResult.idSign = { ok: sig };
+        forms.idKey = status.device_id; forms.idSig = sig; forms.idVerifyMsg = forms.idMsg;
+        toast("Signed", "ok");
+      } catch (e) { lastResult.idSign = { err: String(e) }; toast(String(e), "bad"); }
+      render("identity");
+    }));
+    if (lastResult.idSign) {
+      if (lastResult.idSign.err) s.append(el("div", "note bad", lastResult.idSign.err));
+      else s.append(el("pre", "out", lastResult.idSign.ok));
+    }
+    cols.append(s);
+
+    const v = card("Verify a device signature", "Exactly the check discovery runs on every beacon it receives before it will trust the peer behind it.");
+    v.append(field("Device id (hex)", bind(input("idKey", ""), "idKey")));
+    v.append(field("Message", bind(input("idVerifyMsg", ""), "idVerifyMsg")));
+    const ts = document.createElement("textarea"); ts.id = "idSig"; bind(ts, "idSig");
+    v.append(field("Signature (hex)", ts));
+    v.append(button("Verify", "", async () => {
+      try {
+        const ok = await invoke("identity_verify", {
+          publicKey: forms.idKey, message: forms.idVerifyMsg, signature: forms.idSig });
+        lastResult.idVerify = { ok };
+      } catch (e) { lastResult.idVerify = { err: String(e) }; }
+      render("identity");
+    }));
+    if (lastResult.idVerify) {
+      if (lastResult.idVerify.err) v.append(el("div", "note bad", lastResult.idVerify.err));
+      else v.append(el("div", "note " + (lastResult.idVerify.ok ? "ok" : "bad"),
+        lastResult.idVerify.ok ? "Signature is valid for that device id." : "Signature did NOT verify."));
+    }
+    cols.append(v);
+    page.append(cols);
+  });
+}
+
+// ---------------------------------------------------------------------
+// Protocol
+// ---------------------------------------------------------------------
+let packetTypes = [];
+function renderProtocol() {
+  replace("p-protocol", (page) => {
+    const b = el("div", "banner");
+    b.append(el("b", null, "encrypted_payload is named for what it will hold."));
+    b.append(document.createTextNode(" MLS is not implemented, so nothing encrypts it today — what you put in is what comes out, and the authentication tag is zeroed. GNP is also not wired to a live transport yet; mesh routing has its own message format. This screen exercises the packet model and its parser."));
+    page.append(b);
+
+    const cols = el("div", "cols");
+
+    const c = card("Build a packet");
+    const ts = select("gnpType", packetTypes.map((t) => ({ value: t, label: t })));
+    ts.value = forms.gnpType; ts.onchange = () => { forms.gnpType = ts.value; };
+    c.append(field("Packet type", ts));
+    const destRow = el("div", "row");
+    destRow.append(field("Destination identity (64 hex)", bind(input("gnpDest", "00…"), "gnpDest")));
+    destRow.append(button("Use a peer", "ghost", () => {
+      const p = peers.find((x) => x.routable) || peers[0];
+      if (!p) return toast("No peers to borrow an id from", "bad");
+      forms.gnpDest = p.device_id; render("protocol");
+    }));
+    c.append(destRow);
+    const r = el("div", "row");
+    r.append(field("Sequence number", bind(input("gnpSeq", "1"), "gnpSeq")));
+    r.append(field("Expires in (seconds)", bind(input("gnpExp", "300"), "gnpExp")));
+    c.append(r);
+    const pl = document.createElement("textarea"); pl.id = "gnpPayload"; bind(pl, "gnpPayload");
+    c.append(field("Payload", pl));
+    c.append(button("Build", "", async () => {
+      const seq = parseInt(forms.gnpSeq, 10), exp = parseInt(forms.gnpExp, 10);
+      if (isNaN(seq) || isNaN(exp)) return toast("Sequence and expiry must be numbers", "bad");
+      try {
+        const v = await invoke("gnp_build", {
+          packetType: forms.gnpType, destination: forms.gnpDest,
+          sequenceNumber: seq, expiresInSecs: exp, payload: forms.gnpPayload });
+        lastResult.gnp = { ok: v, from: "built" };
+        forms.gnpHex = v.encoded_hex;
+        toast("Built — " + v.encoded_bytes + " bytes on the wire", "ok");
+      } catch (e) { lastResult.gnp = { err: String(e) }; toast(String(e), "bad"); }
+      render("protocol");
+    }));
+    cols.append(c);
+
+    const d = card("Decode bytes", "Feed it anything. The parser is fuzz-tested to never panic on garbage — malformed input comes back as an error, not a crash.");
+    const hx = document.createElement("textarea"); hx.id = "gnpHex"; hx.style.minHeight = "110px"; bind(hx, "gnpHex");
+    d.append(field("Packet bytes (hex)", hx));
+    d.append(button("Decode", "", async () => {
+      try {
+        const v = await invoke("gnp_decode", { hex: forms.gnpHex });
+        lastResult.gnp = { ok: v, from: "decoded" };
+        toast("Decoded", "ok");
+      } catch (e) { lastResult.gnp = { err: String(e) }; toast(String(e), "bad"); }
+      render("protocol");
+    }));
+    cols.append(d);
+    page.append(cols);
+
+    if (lastResult.gnp) {
+      const out = card(lastResult.gnp.from === "decoded" ? "Decoded packet" : "Built packet");
+      if (lastResult.gnp.err) out.append(el("div", "note bad", lastResult.gnp.err));
+      else {
+        const v = lastResult.gnp.ok;
+        out.append(kv([
+          ["Version", String(v.version)],
+          ["Type", v.packet_type],
+          ["Source", v.source_identity],
+          ["Destination", v.destination_identity],
+          ["Sequence", String(v.sequence_number)],
+          ["Expiration", v.expiration + "  (" + new Date(v.expiration * 1000).toLocaleString() + ")"],
+          ["Payload", v.payload_bytes + " bytes" + (v.payload_utf8 !== null ? "  ·  " + v.payload_utf8 : "  ·  not valid UTF-8")],
+          ["Auth tag", v.authentication_tag],
+          ["Encoded size", v.encoded_bytes + " bytes"],
+        ]));
+        out.append(el("pre", "out", v.encoded_hex));
+        out.append(copyBtn(v.encoded_hex));
+      }
+      page.append(out);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------
+// Storage
+// ---------------------------------------------------------------------
+function renderStorage() {
+  replace("p-storage", (page) => {
+    if (!status) return;
+    if (!status.running) return notRunning(page);
+
+    const c = card("Tables",
+      "The local-first schema from the blueprint's data model. Only mesh_outbox has a write path in this build — the rest are created and empty, which is where the work actually is rather than where it is claimed to be.");
+    if (tables.length === 0) {
+      c.append(el("div", "empty", "Reading the database…"));
+    } else {
+      const rows = tables.map((t) => {
+        const tr = document.createElement("tr");
+        tr.append(el("td", "mono", t.name));
+        tr.append(el("td", "mono", String(t.rows)));
+        const st = el("td");
+        st.append(el("span", "tag " + (t.written_by_v01 ? "gw" : "no"), t.written_by_v01 ? "in use" : "schema only"));
+        tr.append(st);
+        return tr;
+      });
+      c.append(table(["Table", "Rows", "Status"], rows));
+    }
+    c.append(kv([["Database file", status.store_path]]));
+    page.append(c);
+  });
+}
+
+// ---------------------------------------------------------------------
+// Log
+// ---------------------------------------------------------------------
+function renderLog() {
+  replace("p-log", (page) => {
+    const c = card(null, null);
+    const acts = el("div", "row");
+    acts.style.marginBottom = "10px";
+    acts.append(button("Clear", "ghost", async () => { await invoke("clear_log"); logs = []; render("log"); }));
+    c.append(acts);
+    if (logs.length === 0) {
+      c.append(el("div", "empty", "Nothing logged yet."));
+    } else {
+      const box = el("div");
+      for (const e of logs.slice().reverse()) {
+        const line = el("div", "logline " + e.level);
+        line.append(el("span", "t", clock(e.ts_unix)));
+        line.append(el("span", "l", e.level));
+        line.append(el("span", "m", e.text));
+        box.append(line);
+      }
+      c.append(box);
+    }
+    page.append(c);
+  });
+}
+
+// ---------------------------------------------------------------------
+// boot
+// ---------------------------------------------------------------------
+(async function boot() {
+  buildNav();
+  try {
+    algorithms = await invoke("crypto_algorithms");
+    packetTypes = await invoke("gnp_packet_types");
+    history = await invoke("message_history");
+  } catch (e) { /* the node may not be up; the status poll reports it */ }
+  show("overview");
+  await refresh();
+  setInterval(refresh, 1000);
+})();
+</script>
+</body>
+</html>

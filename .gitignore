@@ -17,3 +17,12 @@ verify.cmd
 ffibuild.cmd
 dumpexports.cmd
 uibuild.cmd
+
+# Tauri desktop client build output + local build wrappers
+ui/gabriel-desktop/src-tauri/target/
+tauribuild.cmd
+taurirelease.cmd
+*.log
+
+# npm / wallet workspace
+node_modules/

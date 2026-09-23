@@ -143,6 +143,14 @@ impl NeighborTable {
         self.len() == 0
     }
 
+    /// Every neighbor we currently know how to reach, as (id, address)
+    /// pairs. The UI lists these so a user can see -- and prune -- the
+    /// table that flooding actually walks, rather than inferring it from
+    /// the discovery peer list (which also contains unroutable peers).
+    pub fn list(&self) -> Vec<(DeviceId, SocketAddr)> {
+        self.snapshot()
+    }
+
     fn snapshot(&self) -> Vec<(DeviceId, SocketAddr)> {
         self.inner.lock().unwrap().iter().map(|(k, v)| (*k, *v)).collect()
     }
@@ -593,4 +601,27 @@ mod tests {
         });
         assert!(completed, "parsing must not hang on a corrupted length prefix");
     }
+    /// The UI lists the neighbour table directly, so `list` has to agree
+    /// with what `set`/`remove` actually did -- not just with `len`.
+    #[test]
+    fn neighbor_table_list_reflects_set_and_remove() {
+        let table = NeighborTable::new();
+        let a = [1u8; 32];
+        let b = [2u8; 32];
+        let addr_a: SocketAddr = "127.0.0.1:9001".parse().unwrap();
+        let addr_b: SocketAddr = "127.0.0.1:9002".parse().unwrap();
+
+        assert!(table.list().is_empty());
+
+        table.set(a, addr_a);
+        table.set(b, addr_b);
+        let mut listed = table.list();
+        listed.sort_by_key(|(id, _)| *id);
+        assert_eq!(listed, vec![(a, addr_a), (b, addr_b)]);
+        assert_eq!(listed.len(), table.len());
+
+        table.remove(&a);
+        assert_eq!(table.list(), vec![(b, addr_b)]);
+    }
+
 }
