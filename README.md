@@ -1,5 +1,9 @@
 # Gabriel
 
+> **New here, or not a developer?** Read [GUIDE.md](GUIDE.md) instead --
+> what Gabriel does, how it helps, and how to run it, in plain English
+> with no code.
+
 Adaptive, privacy-preserving connectivity platform for Windows -- LAN mesh
 messaging, store-and-forward resilience, and (later) crypto-native value
 transfer over standard, transparent on-chain transactions.
@@ -247,6 +251,44 @@ cargo run -p gabriel-client -- mesh --identity-path a.key --store-path a.sqlite 
   --mesh-bind 127.0.0.1:44001 --no-discovery --neighbor ID_C@127.0.0.1:44003
 # within 15s (the retry interval), C receives the message A queued in the PREVIOUS run
 ```
+
+## Gateway metering
+
+The relay counts every byte against the device that asked for it, and the
+totals persist. A device cannot get a fresh allowance by reconnecting, and
+closing the process does not wipe the ledger.
+
+```bash
+gabriel-gatewayd --metered                    # count everything, relay for anyone
+gabriel-gatewayd --require-grant              # and turn away devices with no grant
+gabriel-gatewayd --grant <device-id>=500MB    # give an allowance (KB/MB/GB suffixes)
+gabriel-gatewayd --usage                      # print who used what, and exit
+```
+
+The desktop client is always metered -- a gateway that cannot say who used
+what is not something anyone should share a connection through -- and has
+a **Data usage** screen for grants, per-device totals and session history.
+
+**Quotas are enforced during a session, not only at connect time.** A
+quota checked once at the handshake is not a quota: a single connection
+can stream forever. `MeteredStream` fails the read or write that would
+cross the limit, which tears the relay down mid-flight.
+
+The cost of that is that a limit binds to within one buffer rather than
+exactly: the chunk that crosses the line is still delivered and still
+counted. Splitting every chunk to land precisely on the limit would cost
+more than the few kilobytes it saves, so `charge` is documented as "stop
+at or just past the limit", never "stop before it", and the ledger records
+what actually moved.
+
+Checkpoints every 5s bound what a crash can lose. Sessions left open by a
+crash are closed at the next start, so their bytes stop looking like live
+traffic while still counting against the device.
+
+Verified end to end, not only in unit tests: a real HTTP fetch through a
+running metered `gabriel-gatewayd` recorded 924 bytes against the fetching
+device, read back afterwards by a *separate process* from the same SQLite
+file.
 
 ## Non-goals (carried over from the blueprint, load-bearing, do not relax)
 

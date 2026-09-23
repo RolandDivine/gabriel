@@ -22,6 +22,8 @@
 //!   (no CLI equivalent)            -> list_outbox / retry_outbox / prune_outbox
 //!   (no CLI equivalent)            -> crypto_* (the agility layer)
 //!   (no CLI equivalent)            -> gnp_build / gnp_decode
+//!   gabriel-gatewayd --usage       -> list_usage, list_sessions
+//!   gabriel-gatewayd --grant       -> grant_data, revoke_data
 //!   (no CLI equivalent)            -> table_counts (the local schema)
 //!
 //! The core is async and the webview calls in synchronously, so the node
@@ -44,6 +46,7 @@ use tokio::net::TcpListener;
 use gabriel_core::crypto::{self, AgilePublicKey, AgileSignature, AgileSigningKey, AlgorithmId};
 use gabriel_core::discovery::{DiscoveryService, DISCOVERY_MULTICAST_ADDR, DISCOVERY_PORT};
 use gabriel_core::gateway::{GatewayClient, GatewayServer, DEFAULT_GATEWAY_PORT};
+use gabriel_core::metering::{QuotaPolicy, UsageLedger};
 use gabriel_core::identity::Identity;
 use gabriel_core::protocol::{GnpPacket, PacketType};
 use gabriel_core::routing::{MeshRouter, NeighborTable};
@@ -87,6 +90,10 @@ struct Node {
     /// removing a discovered neighbor only sticks until the next sync pass.
     manual_neighbors: Arc<Mutex<HashSet<[u8; 32]>>>,
     gateway: Mutex<Option<GatewayHandle>>,
+    /// Byte accounting for the gateway relay. Built whether or not the
+    /// relay is running, so usage from previous runs is readable at any
+    /// time -- it lives in the same SQLite file as everything else.
+    ledger: Arc<UsageLedger>,
 }
 
 impl Node {
@@ -233,6 +240,12 @@ struct StatusView {
     gateway_addr: Option<String>,
     gateway_uptime_secs: u64,
     default_gateway_port: u16,
+    /// Whether the relay is counting bytes, and whether it turns away
+    /// devices that have no grant.
+    metered: bool,
+    require_grant: bool,
+    total_relayed_bytes: u64,
+    metered_device_count: usize,
     error: Option<String>,
 }
 
@@ -315,6 +328,32 @@ struct GnpView {
 }
 
 #[derive(Serialize)]
+struct UsageView {
+    device_id: String,
+    display_name: Option<String>,
+    consumed_bytes: u64,
+    granted_bytes: Option<u64>,
+    remaining_bytes: Option<u64>,
+    /// 0..=100, or None when the device has no grant.
+    percent_used: Option<u8>,
+    sessions: u64,
+    last_seen_unix: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct SessionView {
+    session_id: String,
+    device_id: String,
+    display_name: Option<String>,
+    target: String,
+    bytes_up: u64,
+    bytes_down: u64,
+    started_at: i64,
+    ended_at: Option<i64>,
+    closed: bool,
+}
+
+#[derive(Serialize)]
 struct TableCount {
     name: String,
     rows: i64,
@@ -351,12 +390,17 @@ fn node_status(state: State<AppState>) -> StatusView {
             gateway_addr: None,
             gateway_uptime_secs: 0,
             default_gateway_port: DEFAULT_GATEWAY_PORT,
+            metered: false,
+            require_grant: false,
+            total_relayed_bytes: 0,
+            metered_device_count: 0,
             error: state.error.lock().unwrap().clone(),
         };
     };
 
     let peers = node.discovery.peers();
     let gateway = node.gateway.lock().unwrap();
+    let devices = node.ledger.all_device_usage().unwrap_or_default();
 
     StatusView {
         running: true,
@@ -379,6 +423,10 @@ fn node_status(state: State<AppState>) -> StatusView {
         gateway_addr: gateway.as_ref().map(|g| g.addr.to_string()),
         gateway_uptime_secs: gateway.as_ref().map(|g| g.started_at.elapsed().as_secs()).unwrap_or(0),
         default_gateway_port: DEFAULT_GATEWAY_PORT,
+        metered: true,
+        require_grant: node.ledger.policy() == QuotaPolicy::RequireGrant,
+        total_relayed_bytes: devices.iter().map(|d| d.consumed_bytes).sum(),
+        metered_device_count: devices.len(),
         error: state.error.lock().unwrap().clone(),
     }
 }
@@ -796,7 +844,11 @@ fn start_gateway(state: State<AppState>, port: u16) -> Result<String, String> {
         .map_err(|e| format!("couldn't bind {bind}: {e}"))?;
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
 
-    let task = node.runtime.spawn(GatewayServer::new().serve(listener));
+    // Always metered: a gateway that cannot say who used what is not
+    // something anyone should share a connection through.
+    let task = node
+        .runtime
+        .spawn(GatewayServer::metered(node.ledger.clone()).serve(listener));
     *node.gateway.lock().unwrap() = Some(GatewayHandle {
         addr,
         started_at: Instant::now(),
@@ -824,6 +876,105 @@ fn stop_gateway(state: State<AppState>) -> Result<(), String> {
         }
         None => Err("gateway sharing isn't running".into()),
     }
+}
+
+// ---------------------------------------------------------------------
+// Gateway: who used how much
+// ---------------------------------------------------------------------
+
+/// Per-device usage against this gateway. The whole point of metering:
+/// shared bandwidth you can actually account for.
+#[tauri::command]
+fn list_usage(state: State<AppState>) -> Result<Vec<UsageView>, String> {
+    let node = state.node.lock().unwrap();
+    let node = node.as_ref().ok_or("node is not running")?;
+    let names: HashMap<[u8; 32], String> = node
+        .discovery
+        .peers()
+        .into_iter()
+        .map(|p| (p.device_id, p.display_name))
+        .collect();
+
+    Ok(node
+        .ledger
+        .all_device_usage()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|d| {
+            let remaining = d.remaining();
+            UsageView {
+                device_id: gabriel_core::hex_encode(&d.device_id),
+                display_name: names.get(&d.device_id).cloned(),
+                consumed_bytes: d.consumed_bytes,
+                granted_bytes: d.granted_bytes,
+                remaining_bytes: remaining,
+                percent_used: d.granted_bytes.map(|g| {
+                    if g == 0 {
+                        100
+                    } else {
+                        ((d.consumed_bytes.min(g) as f64 / g as f64) * 100.0) as u8
+                    }
+                }),
+                sessions: d.sessions,
+                last_seen_unix: d.last_seen_at,
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn list_sessions(state: State<AppState>) -> Result<Vec<SessionView>, String> {
+    let node = state.node.lock().unwrap();
+    let node = node.as_ref().ok_or("node is not running")?;
+    let names: HashMap<[u8; 32], String> = node
+        .discovery
+        .peers()
+        .into_iter()
+        .map(|p| (p.device_id, p.display_name))
+        .collect();
+
+    Ok(node
+        .ledger
+        .recent_sessions(100)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|s| SessionView {
+            session_id: gabriel_core::hex_encode(&s.session_id),
+            display_name: names.get(&s.device_id).cloned(),
+            device_id: gabriel_core::hex_encode(&s.device_id),
+            target: s.target,
+            bytes_up: s.bytes_up,
+            bytes_down: s.bytes_down,
+            started_at: s.started_at,
+            ended_at: s.ended_at,
+            closed: s.closed,
+        })
+        .collect())
+}
+
+/// Gives a device an allowance. `bytes` is absolute, not an increment, so
+/// setting it twice does not stack -- the second value replaces the first.
+#[tauri::command]
+fn grant_data(state: State<AppState>, device_id: String, bytes: u64) -> Result<(), String> {
+    let id = parse_device_id(&device_id).ok_or("device id must be 64 hex characters")?;
+    let node = state.node.lock().unwrap();
+    let node = node.as_ref().ok_or("node is not running")?;
+    node.ledger.grant(&id, bytes, None).map_err(|e| e.to_string())?;
+    state.log.push(
+        "info",
+        format!("granted {} bytes to {}", bytes, short(&device_id)),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn revoke_data(state: State<AppState>, device_id: String) -> Result<(), String> {
+    let id = parse_device_id(&device_id).ok_or("device id must be 64 hex characters")?;
+    let node = state.node.lock().unwrap();
+    let node = node.as_ref().ok_or("node is not running")?;
+    node.ledger.revoke(&id).map_err(|e| e.to_string())?;
+    state.log.push("warn", format!("revoked the grant for {}", short(&device_id)));
+    Ok(())
 }
 
 // ---------------------------------------------------------------------
@@ -1302,6 +1453,16 @@ fn start_node(display_name: String, log: Log) -> anyhow::Result<Node> {
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
 
+    // Open by default: turning metering on should not silently cut off
+    // peers that were already using this gateway. The UI can switch to
+    // requiring a grant.
+    let ledger = UsageLedger::new(store.clone(), QuotaPolicy::Open);
+    match ledger.close_orphaned_sessions() {
+        Ok(n) if n > 0 => log.push("warn", format!("closed {n} relay session(s) left open by a previous run")),
+        Err(err) => log.push("error", format!("could not reconcile old relay sessions: {err:#}")),
+        _ => {}
+    }
+
     let neighbors = NeighborTable::new();
     let (router, mut inbox_rx) = MeshRouter::new(identity.clone(), neighbors.clone(), store.clone());
 
@@ -1407,6 +1568,7 @@ fn start_node(display_name: String, log: Log) -> anyhow::Result<Node> {
         started_at: Instant::now(),
         manual_neighbors,
         gateway: Mutex::new(None),
+        ledger,
     })
 }
 
@@ -1446,6 +1608,10 @@ fn main() {
             start_gateway,
             stop_gateway,
             gateway_fetch,
+            list_usage,
+            list_sessions,
+            grant_data,
+            revoke_data,
             identity_sign,
             identity_verify,
             crypto_algorithms,

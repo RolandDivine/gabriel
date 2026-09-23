@@ -238,6 +238,7 @@
   <div class="page hide" id="p-network"></div>
   <div class="page hide" id="p-messages"></div>
   <div class="page hide" id="p-gateway"></div>
+  <div class="page hide" id="p-usage"></div>
   <div class="page hide" id="p-outbox"></div>
   <div class="page hide" id="p-crypto"></div>
   <div class="page hide" id="p-identity"></div>
@@ -264,6 +265,8 @@ const TABS = [
     blurb: "Signed messages flooded across the mesh, with a hop-count TTL and duplicate suppression." },
   { id: "gateway",  icon: "⇄", label: "Gateway",   title: "Gateway sharing",
     blurb: "Share this device's internet connection with peers that have none, or route your own traffic through someone else's." },
+  { id: "usage",    icon: "25D4", label: "Data usage", title: "Data usage",
+    blurb: "Who has used your shared connection, how much, and how much they have left. Every relayed byte is counted against the device that asked for it." },
   { id: "outbox",   icon: "⧖", label: "Outbox",    title: "Store-and-forward outbox",
     blurb: "Messages sent while no neighbour was reachable. Persisted in SQLite, so they survive a restart and go out when a peer appears." },
   { id: "crypto",   icon: "⌘", label: "Crypto",    title: "Cryptographic agility",
@@ -383,6 +386,16 @@ function table(headers, rows) {
 }
 const short = (id) => (id && id.length > 16 ? id.slice(0, 16) + "…" : id || "");
 const clock = (unix) => new Date(unix * 1000).toLocaleTimeString();
+// Decimal units, to match how data plans are sold -- someone comparing
+// this against their 1GB bundle should see the same kind of number.
+function bytes(n) {
+  if (n === null || n === undefined) return "2014";
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + " GB";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + " MB";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + " KB";
+  return n + " B";
+}
+
 function duration(secs) {
   if (secs < 60) return secs + "s";
   if (secs < 3600) return Math.floor(secs / 60) + "m " + (secs % 60) + "s";
@@ -422,7 +435,7 @@ const forms = {
   vAlgoKey: "Ed25519", vKey: "", vMsg: "", vAlgoSig: "Ed25519", vSig: "",
   idMsg: "gabriel discovery announcement", idKey: "", idVerifyMsg: "", idSig: "",
   gnpType: "Messaging", gnpDest: "", gnpSeq: "1", gnpExp: "300", gnpPayload: "hello mesh", gnpHex: "",
-  compose: "", rename: "",
+  compose: "", rename: "", grantId: "", grantMb: "500",
 };
 function bind(node, key) {
   node.value = forms[key] || "";
@@ -434,6 +447,7 @@ function bind(node, key) {
 // live data
 // ---------------------------------------------------------------------
 let outbox = [], neighbors = [], history = [], logs = [], keys = [], tables = [];
+let usage = [], sessions = [];
 let lastResult = { fetch: null, sign: null, verify: null, gnp: null, idSign: null, idVerify: null };
 
 async function refresh() {
@@ -452,7 +466,8 @@ async function refresh() {
   $("liveName").textContent = status.display_name || "";
   $("brandSub").textContent = "v" + status.version;
   setBadge("network", status.peer_count);
-  setBadge("outbox", status.outbox_count);
+    setBadge("outbox", status.outbox_count);
+    setBadge("usage", status.metered_device_count);
 
   if (status.running) {
     peers = await invoke("list_peers");
@@ -465,6 +480,12 @@ async function refresh() {
     }
     if (tab === "network") neighbors = await invoke("list_neighbors");
     if (tab === "outbox") { try { outbox = await invoke("list_outbox"); } catch (e) { outbox = []; } }
+    if (tab === "usage") {
+      try {
+        usage = await invoke("list_usage");
+        sessions = await invoke("list_sessions");
+      } catch (e) { usage = []; sessions = []; }
+    }
     if (tab === "storage") { try { tables = await invoke("table_counts"); } catch (e) { tables = []; } }
     if (tab === "crypto") keys = await invoke("crypto_list_keys");
   }
@@ -478,6 +499,7 @@ function render(which) {
   if (which === "network") return renderNetwork();
   if (which === "messages") return renderMessages();
   if (which === "gateway") return renderGateway();
+  if (which === "usage") return renderUsage();
   if (which === "outbox") return renderOutbox();
   if (which === "crypto") return renderCrypto();
   if (which === "identity") return renderIdentity();
@@ -889,6 +911,124 @@ function renderOutbox() {
       c.append(table(["Message", "To", "Attempts", "Expires in", ""], rows));
     }
     page.append(c);
+  });
+}
+
+// ---------------------------------------------------------------------
+// Data usage
+// ---------------------------------------------------------------------
+function renderUsage() {
+  replace("p-usage", (page) => {
+    if (!status) return;
+    if (!status.running) return notRunning(page);
+
+    const s = card(null, null);
+    const grid = el("div", "stats");
+    grid.append(
+      stat(bytes(status.total_relayed_bytes), "relayed in total"),
+      stat(status.metered_device_count, "devices seen"),
+      stat(status.gateway_sharing ? "on" : "off", "sharing right now"),
+      stat(usage.filter((u) => u.granted_bytes !== null).length, "with an allowance"),
+    );
+    s.append(grid);
+    page.append(s);
+
+    const c = card("Devices",
+      "Every byte relayed through your connection is counted against the device that asked for it, and the total survives a restart — a device cannot get a fresh allowance by reconnecting.");
+
+    if (usage.length === 0) {
+      c.append(el("div", "empty",
+        "Nobody has used your connection yet. Turn sharing on in the Gateway tab, then give a device an allowance below."));
+    } else {
+      const rows = usage.map((u) => {
+        const tr = document.createElement("tr");
+
+        const who = el("td");
+        who.append(el("span", null, u.display_name || short(u.device_id)));
+        if (u.remaining_bytes === 0) who.append(el("span", "tag", "out of data"));
+        tr.append(who);
+
+        tr.append(el("td", "mono", bytes(u.consumed_bytes)));
+        tr.append(el("td", "mono", u.granted_bytes === null ? "no limit" : bytes(u.granted_bytes)));
+
+        const left = el("td");
+        if (u.remaining_bytes === null) {
+          left.append(el("span", "mono", "—"));
+        } else {
+          const bar = el("div");
+          bar.style.cssText =
+            "height:5px;border-radius:3px;background:var(--panel-3);overflow:hidden;margin-bottom:3px";
+          const fill = el("div");
+          fill.style.height = "100%";
+          fill.style.width = u.percent_used + "%";
+          fill.style.background = u.percent_used >= 90 ? "var(--bad)" : "var(--ok)";
+          bar.append(fill);
+          left.append(bar, el("span", "mono", bytes(u.remaining_bytes) + " left"));
+        }
+        tr.append(left);
+
+        tr.append(el("td", "mono", String(u.sessions)));
+
+        const act = el("td");
+        act.append(button("Set allowance", "ghost tiny", () => {
+          const name = u.display_name || short(u.device_id);
+          const mb = prompt("How many megabytes for " + name + "?", "500");
+          if (mb === null) return;
+          const n = Number(mb);
+          if (!isFinite(n) || n < 0) return toast("That is not a number of megabytes", "bad");
+          invoke("grant_data", { deviceId: u.device_id, bytes: Math.round(n * 1e6) })
+            .then(() => toast("Granted " + n + " MB", "ok"))
+            .catch((e) => toast(String(e), "bad"));
+        }));
+        if (u.granted_bytes !== null) {
+          act.append(button("Remove limit", "ghost tiny", () => {
+            invoke("revoke_data", { deviceId: u.device_id })
+              .then(() => toast("Allowance removed"))
+              .catch((e) => toast(String(e), "bad"));
+          }));
+        }
+        tr.append(act);
+        return tr;
+      });
+      c.append(table(["Device", "Used", "Allowance", "Remaining", "Sessions", ""], rows));
+    }
+
+    const addRow = el("div", "row");
+    addRow.style.marginTop = "12px";
+    addRow.append(field("Device id (64 hex characters)", bind(input("grantId", "3f9a…"), "grantId")));
+    addRow.append(field("Megabytes", bind(input("grantMb", "500"), "grantMb")));
+    addRow.append(button("Give an allowance", "", async () => {
+      const n = Number(forms.grantMb);
+      if (!isFinite(n) || n < 0) return toast("That is not a number of megabytes", "bad");
+      try {
+        await invoke("grant_data", { deviceId: forms.grantId, bytes: Math.round(n * 1e6) });
+        forms.grantId = "";
+        toast("Granted " + n + " MB", "ok");
+      } catch (e) { toast(String(e), "bad"); }
+    }));
+    c.append(addRow);
+    page.append(c);
+
+    const sc = card("Recent sessions",
+      "One row per relay session. A session still marked open belongs to a connection that is live now, or to one the app was killed during.");
+    if (sessions.length === 0) {
+      sc.append(el("div", "empty", "No sessions yet."));
+    } else {
+      const rows = sessions.slice(0, 30).map((sess) => {
+        const tr = document.createElement("tr");
+        tr.append(el("td", null, sess.display_name || short(sess.device_id)));
+        tr.append(el("td", "mono", sess.target));
+        tr.append(el("td", "mono", bytes(sess.bytes_up)));
+        tr.append(el("td", "mono", bytes(sess.bytes_down)));
+        tr.append(el("td", "mono", clock(sess.started_at)));
+        const st = el("td");
+        st.append(el("span", "tag " + (sess.closed ? "no" : "gw"), sess.closed ? "closed" : "open"));
+        tr.append(st);
+        return tr;
+      });
+      sc.append(table(["Device", "Target", "Up", "Down", "Started", ""], rows));
+    }
+    page.append(sc);
   });
 }
 

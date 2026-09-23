@@ -18,7 +18,7 @@
 
 use std::sync::Mutex;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::Result;
 
@@ -118,6 +118,27 @@ impl Store {
                 row_id TEXT NOT NULL,
                 version_vector TEXT NOT NULL,
                 updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS gateway_usage (
+                session_id BLOB PRIMARY KEY,
+                device_id BLOB NOT NULL,
+                target TEXT NOT NULL,
+                bytes_up INTEGER NOT NULL,
+                bytes_down INTEGER NOT NULL,
+                started_at INTEGER NOT NULL,
+                ended_at INTEGER,
+                closed INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE INDEX IF NOT EXISTS gateway_usage_device
+                ON gateway_usage(device_id);
+
+            CREATE TABLE IF NOT EXISTS gateway_quotas (
+                device_id BLOB PRIMARY KEY,
+                granted_bytes INTEGER NOT NULL,
+                granted_at INTEGER NOT NULL,
+                note TEXT
             );
 
             CREATE TABLE IF NOT EXISTS mesh_outbox (
@@ -237,6 +258,166 @@ impl Store {
             out.push((name, count));
         }
         Ok(out)
+    }
+
+    // -----------------------------------------------------------------
+    // Gateway metering
+    // -----------------------------------------------------------------
+
+    /// Inserts or updates one relay session's accounting. Keyed on
+    /// `session_id`, so the periodic checkpoint and the final close write
+    /// to the same row rather than accumulating duplicates.
+    pub fn upsert_usage(&self, record: &crate::metering::UsageRecord) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO gateway_usage
+                (session_id, device_id, target, bytes_up, bytes_down, started_at, ended_at, closed)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(session_id) DO UPDATE SET
+                bytes_up = excluded.bytes_up,
+                bytes_down = excluded.bytes_down,
+                ended_at = excluded.ended_at,
+                closed = excluded.closed",
+            params![
+                &record.session_id[..],
+                &record.device_id[..],
+                record.target,
+                record.bytes_up as i64,
+                record.bytes_down as i64,
+                record.started_at,
+                record.ended_at,
+                record.closed as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// What one device has been granted and has used. Returns a zeroed
+    /// record rather than an error for a device that has never connected,
+    /// because "never seen" and "seen, used nothing" are the same answer
+    /// to the question the gateway is asking.
+    pub fn device_usage(&self, device_id: &[u8; 32]) -> Result<crate::metering::DeviceUsage> {
+        let conn = self.conn.lock().unwrap();
+
+        let granted: Option<i64> = conn
+            .query_row(
+                "SELECT granted_bytes FROM gateway_quotas WHERE device_id = ?1",
+                params![&device_id[..]],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let (consumed, sessions, last_seen): (i64, i64, Option<i64>) = conn.query_row(
+            "SELECT COALESCE(SUM(bytes_up + bytes_down), 0), COUNT(*), MAX(started_at)
+             FROM gateway_usage WHERE device_id = ?1",
+            params![&device_id[..]],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+
+        Ok(crate::metering::DeviceUsage {
+            device_id: *device_id,
+            granted_bytes: granted.map(|g| g.max(0) as u64),
+            consumed_bytes: consumed.max(0) as u64,
+            sessions: sessions.max(0) as u64,
+            last_seen_at: last_seen,
+        })
+    }
+
+    /// Every device that has either used the gateway or been granted an
+    /// allowance, heaviest user first. A device with a grant it has never
+    /// touched still appears, which is what makes the list usable for
+    /// managing grants rather than only for reviewing traffic.
+    pub fn all_device_usage(&self) -> Result<Vec<crate::metering::DeviceUsage>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT d.device_id,
+                    q.granted_bytes,
+                    COALESCE(u.consumed, 0),
+                    COALESCE(u.sessions, 0),
+                    u.last_seen
+             FROM (SELECT device_id FROM gateway_usage
+                   UNION SELECT device_id FROM gateway_quotas) AS d
+             LEFT JOIN gateway_quotas q ON q.device_id = d.device_id
+             LEFT JOIN (SELECT device_id,
+                               SUM(bytes_up + bytes_down) AS consumed,
+                               COUNT(*) AS sessions,
+                               MAX(started_at) AS last_seen
+                        FROM gateway_usage GROUP BY device_id) AS u
+                    ON u.device_id = d.device_id
+             ORDER BY COALESCE(u.consumed, 0) DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let device_id: Vec<u8> = row.get(0)?;
+            let granted: Option<i64> = row.get(1)?;
+            let consumed: i64 = row.get(2)?;
+            let sessions: i64 = row.get(3)?;
+            Ok(crate::metering::DeviceUsage {
+                device_id: to_array32(device_id),
+                granted_bytes: granted.map(|g| g.max(0) as u64),
+                consumed_bytes: consumed.max(0) as u64,
+                sessions: sessions.max(0) as u64,
+                last_seen_at: row.get(4)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Most recent sessions first.
+    pub fn recent_usage(&self, limit: usize) -> Result<Vec<crate::metering::UsageRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT session_id, device_id, target, bytes_up, bytes_down, started_at, ended_at, closed
+             FROM gateway_usage ORDER BY started_at DESC, rowid DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            let session_id: Vec<u8> = row.get(0)?;
+            let device_id: Vec<u8> = row.get(1)?;
+            let bytes_up: i64 = row.get(3)?;
+            let bytes_down: i64 = row.get(4)?;
+            let closed: i64 = row.get(7)?;
+            Ok(crate::metering::UsageRecord {
+                session_id: to_array16(session_id),
+                device_id: to_array32(device_id),
+                target: row.get(2)?,
+                bytes_up: bytes_up.max(0) as u64,
+                bytes_down: bytes_down.max(0) as u64,
+                started_at: row.get(5)?,
+                ended_at: row.get(6)?,
+                closed: closed != 0,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn set_grant(&self, device_id: &[u8; 32], bytes: u64, granted_at: i64, note: Option<&str>) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO gateway_quotas (device_id, granted_bytes, granted_at, note)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(device_id) DO UPDATE SET
+                granted_bytes = excluded.granted_bytes,
+                granted_at = excluded.granted_at,
+                note = excluded.note",
+            params![&device_id[..], bytes as i64, granted_at, note],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_grant(&self, device_id: &[u8; 32]) -> Result<()> {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM gateway_quotas WHERE device_id = ?1", params![&device_id[..]])?;
+        Ok(())
+    }
+
+    /// Closes any session left open by a crash. Their byte counts are
+    /// whatever the last checkpoint wrote, which is why the checkpoint
+    /// interval bounds how much accounting a crash can lose.
+    pub fn close_open_usage(&self, ended_at: i64) -> Result<usize> {
+        let closed = self.conn.lock().unwrap().execute(
+            "UPDATE gateway_usage SET closed = 1, ended_at = COALESCE(ended_at, ?1) WHERE closed = 0",
+            params![ended_at],
+        )?;
+        Ok(closed)
     }
 }
 

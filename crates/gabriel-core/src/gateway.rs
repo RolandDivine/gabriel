@@ -28,6 +28,7 @@ use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
 use crate::identity::Identity;
+use crate::metering::{MeteredStream, QuotaDecision, SessionMeter, UsageLedger};
 use crate::wire::{random_id16, read_frame, write_frame, SeenCache};
 use crate::Result;
 
@@ -84,13 +85,35 @@ const MAX_CONCURRENT_RELAYS: usize = 256;
 /// namespace for associated functions) -- use `GatewayServer::new()`.
 pub struct GatewayServer {
     seen: Mutex<SeenCache>,
+    /// Byte accounting, when the gateway is metered. `None` keeps the
+    /// pre-metering behaviour: relay for anyone, count nothing. A gateway
+    /// that intends to charge for bandwidth passes one.
+    ledger: Option<Arc<UsageLedger>>,
 }
 
 impl GatewayServer {
+    /// An unmetered gateway: relays for anyone, counts nothing.
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             seen: Mutex::new(SeenCache::new(SEEN_CACHE_CAPACITY)),
+            ledger: None,
         })
+    }
+
+    /// A metered gateway. Every session is counted against the device
+    /// that opened it, quotas are enforced while bytes are moving rather
+    /// than only at connect time, and the accounting survives a restart
+    /// because it lives in the store rather than in memory.
+    pub fn metered(ledger: Arc<UsageLedger>) -> Arc<Self> {
+        Arc::new(Self {
+            seen: Mutex::new(SeenCache::new(SEEN_CACHE_CAPACITY)),
+            ledger: Some(ledger),
+        })
+    }
+
+    /// The ledger this gateway meters against, if it is metered at all.
+    pub fn ledger(&self) -> Option<&Arc<UsageLedger>> {
+        self.ledger.as_ref()
     }
 
     /// Binds `bind_addr` and serves forever.
@@ -143,6 +166,26 @@ impl GatewayServer {
             anyhow::bail!("rejected gateway request: {reason}");
         }
 
+        // Quota is checked before the target is dialled, so a device that
+        // is out of allowance never causes an outbound connection.
+        let remaining = match &self.ledger {
+            None => crate::metering::UNLIMITED,
+            Some(ledger) => match ledger.authorize(&request.payload.device_id)? {
+                QuotaDecision::Allow { remaining } => remaining,
+                QuotaDecision::Deny { reason } => {
+                    write_frame(
+                        &mut client,
+                        &GatewayResponse {
+                            accepted: false,
+                            reason: Some(reason.clone()),
+                        },
+                    )
+                    .await?;
+                    anyhow::bail!("refused {}: {reason}", crate::hex_encode(&request.payload.device_id));
+                }
+            },
+        };
+
         let target_host = request.payload.target_host.clone();
         let target_port = request.payload.target_port;
         let target = match timeout(
@@ -188,10 +231,52 @@ impl GatewayServer {
         .await?;
 
         let mut target = target;
-        let (to_target, to_client) = copy_bidirectional(&mut client, &mut target).await?;
+        let device_id = request.payload.device_id;
+        let destination = format!("{target_host}:{target_port}");
+
+        // Unmetered: the original path, unchanged.
+        let Some(ledger) = self.ledger.clone() else {
+            let (to_target, to_client) = copy_bidirectional(&mut client, &mut target).await?;
+            eprintln!(
+                "gateway: session for {} to {destination} closed ({to_target} bytes out, {to_client} bytes back)",
+                crate::hex_encode(&device_id)
+            );
+            return Ok(());
+        };
+
+        // Metered. `remaining` was decided by `authorize` before the
+        // target was dialled, so a device over quota never causes an
+        // outbound connection at all.
+        let meter = SessionMeter::new(random_id16(), device_id, &destination, remaining);
+        ledger.checkpoint(&meter)?;
+        let checkpoint = ledger.spawn_checkpoint_task(meter.clone());
+
+        // Wrapping only the client side meters both directions: reading
+        // from the client is upload, writing to it is download.
+        let mut metered_client = MeteredStream::new(client, meter.clone());
+        let outcome = copy_bidirectional(&mut metered_client, &mut target).await;
+
+        checkpoint.abort();
+        ledger.close(&meter)?;
+
+        if meter.is_exhausted() {
+            eprintln!(
+                "gateway: session for {} to {destination} cut off at its quota ({} bytes)",
+                crate::hex_encode(&device_id),
+                meter.total()
+            );
+            // Not an error from the gateway's point of view -- the limit
+            // did what it was for.
+            return Ok(());
+        }
+
+        outcome?;
         eprintln!(
-            "gateway: session for {} to {target_host}:{target_port} closed ({to_target} bytes out, {to_client} bytes back)",
-            crate::hex_encode(&request.payload.device_id)
+            "gateway: session for {} to {destination} closed ({} up, {} down, {} left)",
+            crate::hex_encode(&device_id),
+            meter.bytes_up(),
+            meter.bytes_down(),
+            meter.remaining()
         );
         Ok(())
     }
@@ -457,4 +542,323 @@ mod tests {
             Err(_) => panic!("a rejected connection must close promptly, not hang"),
         }
     }
+    // -----------------------------------------------------------------
+    // Metering, end to end through a real relay
+    // -----------------------------------------------------------------
+
+    use crate::metering::{DeviceUsage, QuotaPolicy, UsageLedger};
+    use crate::store::Store;
+
+    /// A target that echoes back everything it is sent, so a test can
+    /// drive a known number of bytes in each direction.
+    async fn spawn_echo_target() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    loop {
+                        match sock.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => {
+                                if sock.write_all(&buf[..n]).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    async fn spawn_metered_gateway(ledger: Arc<UsageLedger>) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(GatewayServer::metered(ledger).serve(listener));
+        addr
+    }
+
+    fn ledger(policy: QuotaPolicy) -> Arc<UsageLedger> {
+        UsageLedger::new(Arc::new(Store::open_in_memory().unwrap()), policy)
+    }
+
+    /// The core claim: what the ledger records is what actually crossed
+    /// the wire, in both directions, attributed to the device that sent it.
+    #[tokio::test]
+    async fn a_metered_session_records_the_bytes_that_actually_moved() {
+        let target = spawn_echo_target().await;
+        let ledger = ledger(QuotaPolicy::Open);
+        let gateway = spawn_metered_gateway(ledger.clone()).await;
+
+        let identity = Identity::generate_ephemeral();
+        let device_id = identity.public_key();
+        let mut tunnel = GatewayClient::connect_via(&identity, gateway, "127.0.0.1", target.port())
+            .await
+            .unwrap();
+
+        let payload = vec![7u8; 4096];
+        tunnel.write_all(&payload).await.unwrap();
+        let mut echoed = vec![0u8; 4096];
+        tunnel.read_exact(&mut echoed).await.unwrap();
+        assert_eq!(echoed, payload, "the relay must still relay correctly");
+
+        drop(tunnel);
+
+        // Let the session close and the final write land.
+        let usage = await_usage(&ledger, &device_id, 4096 * 2).await;
+        assert_eq!(usage.consumed_bytes, 8192, "4096 up + 4096 back down");
+        assert_eq!(usage.sessions, 1);
+    }
+
+    /// Polls until the ledger reflects at least `expected` bytes, so the
+    /// test does not race the gateway's own close-and-write.
+    async fn await_usage(ledger: &Arc<UsageLedger>, device_id: &[u8; 32], expected: u64) -> DeviceUsage {
+        for _ in 0..100 {
+            let usage = ledger.device_usage(device_id).unwrap();
+            if usage.consumed_bytes >= expected {
+                return usage;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        ledger.device_usage(device_id).unwrap()
+    }
+
+    /// A device with no grant is refused outright under RequireGrant --
+    /// which is the policy a gateway selling bandwidth runs.
+    #[tokio::test]
+    async fn require_grant_refuses_a_device_with_no_allowance() {
+        let target = spawn_echo_target().await;
+        let ledger = ledger(QuotaPolicy::RequireGrant);
+        let gateway = spawn_metered_gateway(ledger.clone()).await;
+
+        let identity = Identity::generate_ephemeral();
+        let result = GatewayClient::connect_via(&identity, gateway, "127.0.0.1", target.port()).await;
+
+        let err = result.expect_err("a device with no grant must be refused");
+        assert!(
+            err.to_string().contains("requires a data grant"),
+            "unhelpful refusal: {err}"
+        );
+    }
+
+    /// The same device, once granted, gets through -- proving the refusal
+    /// above was the policy working rather than the relay being broken.
+    #[tokio::test]
+    async fn a_granted_device_is_allowed_through() {
+        let target = spawn_echo_target().await;
+        let ledger = ledger(QuotaPolicy::RequireGrant);
+        let gateway = spawn_metered_gateway(ledger.clone()).await;
+
+        let identity = Identity::generate_ephemeral();
+        ledger.grant(&identity.public_key(), 1_000_000, Some("test grant")).unwrap();
+
+        let mut tunnel = GatewayClient::connect_via(&identity, gateway, "127.0.0.1", target.port())
+            .await
+            .expect("a granted device must be allowed");
+        tunnel.write_all(b"hello").await.unwrap();
+        let mut buf = [0u8; 5];
+        tunnel.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hello");
+    }
+
+    /// A quota checked only at connect time is not a quota: one connection
+    /// could stream forever. This proves the relay is torn down while
+    /// bytes are moving.
+    #[tokio::test]
+    async fn a_session_is_cut_off_when_it_exceeds_its_quota_mid_flight() {
+        let target = spawn_echo_target().await;
+        let ledger = ledger(QuotaPolicy::RequireGrant);
+        let gateway = spawn_metered_gateway(ledger.clone()).await;
+
+        let identity = Identity::generate_ephemeral();
+        let device_id = identity.public_key();
+        ledger.grant(&device_id, 16_384, None).unwrap();
+
+        let mut tunnel = GatewayClient::connect_via(&identity, gateway, "127.0.0.1", target.port())
+            .await
+            .unwrap();
+
+        // Push far more than the grant. The echo doubles every byte, so
+        // 16KB of allowance is gone well before this finishes.
+        let chunk = vec![9u8; 8192];
+        let mut sent = 0usize;
+        let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if tunnel.write_all(&chunk).await.is_err() {
+                    return sent;
+                }
+                sent += chunk.len();
+                let mut sink = vec![0u8; chunk.len()];
+                if tunnel.read_exact(&mut sink).await.is_err() {
+                    return sent;
+                }
+                if sent > 1_000_000 {
+                    return sent; // the relay should have stopped us long before here
+                }
+            }
+        })
+        .await;
+
+        assert!(outcome.is_ok(), "the relay must end the session, not hang");
+        let moved = outcome.unwrap();
+        assert!(
+            moved < 1_000_000,
+            "the session relayed {moved} bytes against a 16KB grant -- the quota did not bite"
+        );
+
+        let usage = ledger.device_usage(&device_id).unwrap();
+        assert!(usage.consumed_bytes >= 16_384, "usage should reach the grant");
+        assert_eq!(usage.remaining(), Some(0), "the grant should be spent");
+    }
+
+    /// Usage held only in memory would hand every device a fresh
+    /// allowance on restart, which makes a quota decorative. This proves
+    /// consumption accumulates across separate sessions.
+    #[tokio::test]
+    async fn usage_accumulates_across_sessions_rather_than_resetting() {
+        let target = spawn_echo_target().await;
+        let ledger = ledger(QuotaPolicy::Open);
+        let gateway = spawn_metered_gateway(ledger.clone()).await;
+
+        let identity = Identity::generate_ephemeral();
+        let device_id = identity.public_key();
+
+        for _ in 0..3 {
+            let mut tunnel = GatewayClient::connect_via(&identity, gateway, "127.0.0.1", target.port())
+                .await
+                .unwrap();
+            tunnel.write_all(&[1u8; 1024]).await.unwrap();
+            let mut buf = vec![0u8; 1024];
+            tunnel.read_exact(&mut buf).await.unwrap();
+            drop(tunnel);
+        }
+
+        let usage = await_usage(&ledger, &device_id, 3 * 2048).await;
+        assert_eq!(usage.sessions, 3, "each session gets its own record");
+        assert_eq!(usage.consumed_bytes, 3 * 2048, "1KB up + 1KB down, three times");
+    }
+
+    /// Two devices must not be charged for each other's traffic.
+    #[tokio::test]
+    async fn usage_is_attributed_per_device() {
+        let target = spawn_echo_target().await;
+        let ledger = ledger(QuotaPolicy::Open);
+        let gateway = spawn_metered_gateway(ledger.clone()).await;
+
+        let heavy = Identity::generate_ephemeral();
+        let light = Identity::generate_ephemeral();
+
+        for (identity, size) in [(&heavy, 4096usize), (&light, 512usize)] {
+            let mut tunnel = GatewayClient::connect_via(identity, gateway, "127.0.0.1", target.port())
+                .await
+                .unwrap();
+            tunnel.write_all(&vec![3u8; size]).await.unwrap();
+            let mut buf = vec![0u8; size];
+            tunnel.read_exact(&mut buf).await.unwrap();
+            drop(tunnel);
+        }
+
+        let heavy_usage = await_usage(&ledger, &heavy.public_key(), 8192).await;
+        let light_usage = await_usage(&ledger, &light.public_key(), 1024).await;
+        assert_eq!(heavy_usage.consumed_bytes, 8192);
+        assert_eq!(light_usage.consumed_bytes, 1024);
+    }
+
+    /// An unmetered gateway must behave exactly as it did before metering
+    /// existed -- relay for anyone, record nothing.
+    #[tokio::test]
+    async fn an_unmetered_gateway_is_unchanged() {
+        let target = spawn_echo_target().await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(GatewayServer::new().serve(listener));
+
+        let identity = Identity::generate_ephemeral();
+        let mut tunnel = GatewayClient::connect_via(&identity, addr, "127.0.0.1", target.port())
+            .await
+            .expect("an unmetered gateway relays for anyone");
+        tunnel.write_all(b"unmetered").await.unwrap();
+        let mut buf = [0u8; 9];
+        tunnel.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"unmetered");
+        assert!(GatewayServer::new().ledger().is_none());
+    }
+
+    /// Accounting must survive the process dying mid-session. The
+    /// checkpoint bounds the loss; orphaned rows are closed at startup so
+    /// their bytes stop looking like live traffic.
+    #[test]
+    fn a_crashed_session_is_reconciled_on_the_next_start() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let ledger = UsageLedger::new(store.clone(), QuotaPolicy::Open);
+        let device_id = [42u8; 32];
+
+        let meter = SessionMeter::new([1u8; 16], device_id, "example.com:443", crate::metering::UNLIMITED);
+        meter.charge(crate::metering::Direction::Up, 5000);
+        ledger.checkpoint(&meter).unwrap(); // the process dies right here
+
+        let open = ledger.recent_sessions(10).unwrap();
+        assert_eq!(open.len(), 1);
+        assert!(!open[0].closed, "still open, as a crash would leave it");
+        assert_eq!(open[0].bytes_up, 5000, "checkpointed bytes are not lost");
+
+        let closed = ledger.close_orphaned_sessions().unwrap();
+        assert_eq!(closed, 1);
+        assert!(ledger.recent_sessions(10).unwrap()[0].closed);
+
+        // And the bytes still count against the device.
+        assert_eq!(ledger.device_usage(&device_id).unwrap().consumed_bytes, 5000);
+    }
+
+    #[test]
+    fn a_grant_can_be_raised_lowered_and_revoked() {
+        let ledger = ledger(QuotaPolicy::RequireGrant);
+        let device_id = [8u8; 32];
+
+        assert!(matches!(ledger.authorize(&device_id).unwrap(), QuotaDecision::Deny { .. }));
+
+        ledger.grant(&device_id, 1000, None).unwrap();
+        assert_eq!(
+            ledger.authorize(&device_id).unwrap(),
+            QuotaDecision::Allow { remaining: 1000 }
+        );
+
+        ledger.grant(&device_id, 50, Some("reduced")).unwrap();
+        assert_eq!(ledger.authorize(&device_id).unwrap(), QuotaDecision::Allow { remaining: 50 });
+
+        ledger.revoke(&device_id).unwrap();
+        assert!(matches!(ledger.authorize(&device_id).unwrap(), QuotaDecision::Deny { .. }));
+    }
+
+    #[test]
+    fn a_spent_grant_denies_the_next_connection_before_any_bytes_move() {
+        let ledger = ledger(QuotaPolicy::RequireGrant);
+        let device_id = [11u8; 32];
+        ledger.grant(&device_id, 1000, None).unwrap();
+
+        let meter = SessionMeter::new([2u8; 16], device_id, "example.com:80", 1000);
+        meter.charge(crate::metering::Direction::Up, 1000);
+        ledger.close(&meter).unwrap();
+
+        match ledger.authorize(&device_id).unwrap() {
+            QuotaDecision::Deny { reason } => assert!(reason.contains("quota exhausted"), "{reason}"),
+            other => panic!("expected a denial, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_device_list_includes_a_granted_device_that_has_never_connected() {
+        let ledger = ledger(QuotaPolicy::RequireGrant);
+        ledger.grant(&[77u8; 32], 5_000_000, Some("neighbour")).unwrap();
+
+        let all = ledger.all_device_usage().unwrap();
+        assert_eq!(all.len(), 1, "a grant alone should put a device on the list");
+        assert_eq!(all[0].granted_bytes, Some(5_000_000));
+        assert_eq!(all[0].consumed_bytes, 0);
+        assert_eq!(all[0].remaining(), Some(5_000_000));
+    }
+
 }
