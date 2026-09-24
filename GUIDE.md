@@ -67,7 +67,23 @@ it — safely, and without giving them your Wi-Fi password.
 They connect to your Gabriel, prove which device they are, and their
 traffic goes out through your connection. You stay in control.
 
-### 4. You can see and limit exactly how much they use
+### 4. You decide who is allowed to ask
+
+Open the **Who may use** tab and switch it to invitation-only. Now
+strangers are turned away, and you let people in one at a time.
+
+To invite someone, you create a **pass** for their device. It is safe to
+send it however you like — WhatsApp, a text, read out over the phone —
+because it only works for the one device it names. If anyone else gets
+hold of it, it does nothing for them.
+
+You can put a data allowance straight into the pass, so "let them in" and
+"give them 500 MB" is one action instead of two.
+
+Changed your mind about someone? Block them. A block beats a pass you
+already gave out, so you can always take it back.
+
+### 5. You can see and limit exactly how much they use
 
 This is what makes sharing practical rather than scary.
 
@@ -84,7 +100,7 @@ moment they reach the limit, mid-download.**
 And the count does not reset. If they disconnect and come back, Gabriel
 remembers what they already used. Closing the app does not wipe it either.
 
-### 5. It has a crypto wallet built in
+### 6. It has a crypto wallet built in
 
 Gabriel can hold addresses on 13 blockchains from a single recovery
 phrase — Bitcoin, Ethereum, Solana and ten others.
@@ -147,6 +163,7 @@ turn that into income:
 | --- | --- |
 | People to find you | Automatic discovery — they see you without setup |
 | To know who is who | Every device has a verified identity |
+| To control who gets in | Invitation-only mode, plus an allow and block list |
 | To count what they used | Per-device metering, down to the byte |
 | To enforce a limit | Allowances that cut off mid-session |
 | To get paid | A built-in wallet, paid directly to you |
@@ -245,8 +262,9 @@ you are routing through someone's gateway, or they are routing through
 yours.
 
 **Can someone use my connection without me knowing?**
-No. They have to connect to your gateway deliberately, and every byte is
-recorded against their device.
+No. Every byte is recorded against the device that used it. And if you
+switch on invitation-only in the **Who may use** tab, nobody gets in at
+all unless you have let them.
 
 **Can I stop someone?**
 Yes. Set their allowance to zero, or stop sharing entirely. Either takes
@@ -278,7 +296,6 @@ We would rather you know this up front than find out the hard way.
 | Not yet built | What it means for you |
 | --- | --- |
 | **Protection against a stolen key** | If someone steals a device key *and* saved old messages, they could read those old ones. Each new message is safe. |
-| **Deciding who may connect** | Anyone on your network can ask to use your gateway — you can limit how much they use, but not yet who may ask |
 | **Phone app** | Windows computers only |
 | **Sending on 6 of 13 chains** | Bitcoin, Litecoin, Dogecoin, Solana, Tron and Cosmos can receive but not send |
 | **Automatic payment for data** | Metering counts usage; billing someone for it is still manual |

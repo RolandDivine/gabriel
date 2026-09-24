@@ -64,6 +64,11 @@ enum Command {
         path: String,
         #[arg(long, default_value = "gabriel-fetch-identity.key")]
         identity_path: PathBuf,
+        /// An invitation token from the gateway, for one running an
+        /// invitation-only policy. Safe to paste from wherever it was
+        /// sent -- it only works for this device.
+        #[arg(long)]
+        invite: Option<String>,
     },
     /// Run the mesh router: forwards messages for other peers and delivers
     /// anything addressed to this device. Combine with --send-to/--message
@@ -118,7 +123,8 @@ async fn main() -> anyhow::Result<()> {
             port,
             path,
             identity_path,
-        }) => run_fetch(via, host, port, path, identity_path).await,
+            invite,
+        }) => run_fetch(via, host, port, path, identity_path, invite).await,
         Some(Command::Mesh {
             identity_path,
             name,
@@ -175,12 +181,26 @@ async fn run_fetch(
     port: u16,
     path: String,
     identity_path: PathBuf,
+    invite: Option<String>,
 ) -> anyhow::Result<()> {
     let identity = Identity::load_or_create(&identity_path)?;
     println!("device id: {}", gabriel_core::hex_encode(&identity.public_key()));
     println!("requesting {host}:{port}{path} via gateway {via} ...");
 
-    let mut tunnel = GatewayClient::connect_via(&identity, via, &host, port).await?;
+    let invitation = match invite {
+        Some(token) => Some(
+            gabriel_core::admission::SignedInvitation::from_token(&token)
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
+        ),
+        None => None,
+    };
+    if invitation.is_some() {
+        println!("presenting an invitation");
+    }
+
+    let mut tunnel =
+        GatewayClient::connect_via_with_invitation(&identity, via, &host, port, invitation)
+            .await?;
     println!("gateway accepted -- tunnel established, sending HTTP request");
 
     let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");

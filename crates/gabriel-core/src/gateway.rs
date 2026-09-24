@@ -27,6 +27,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
+use crate::admission::{Admission, AdmissionControl, SignedInvitation};
 use crate::identity::Identity;
 use crate::metering::{MeteredStream, QuotaDecision, SessionMeter, UsageLedger};
 use crate::wire::{random_id16, read_frame, write_frame, SeenCache};
@@ -55,6 +56,9 @@ struct GatewayRequestPayload {
     nonce: [u8; 16],
     target_host: String,
     target_port: u16,
+    /// A capability this gateway signed, when the requester has one.
+    /// Optional because an open gateway needs none -- see `admission`.
+    invitation: Option<SignedInvitation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +93,9 @@ pub struct GatewayServer {
     /// pre-metering behaviour: relay for anyone, count nothing. A gateway
     /// that intends to charge for bandwidth passes one.
     ledger: Option<Arc<UsageLedger>>,
+    /// Who may ask at all. `None` admits anyone, which is what the
+    /// gateway did before `admission` existed.
+    admission: Option<Arc<AdmissionControl>>,
 }
 
 impl GatewayServer {
@@ -97,6 +104,7 @@ impl GatewayServer {
         Arc::new(Self {
             seen: Mutex::new(SeenCache::new(SEEN_CACHE_CAPACITY)),
             ledger: None,
+            admission: None,
         })
     }
 
@@ -108,7 +116,24 @@ impl GatewayServer {
         Arc::new(Self {
             seen: Mutex::new(SeenCache::new(SEEN_CACHE_CAPACITY)),
             ledger: Some(ledger),
+            admission: None,
         })
+    }
+
+    /// A metered gateway that also decides who may ask. This is the full
+    /// configuration a gateway selling bandwidth runs: admission answers
+    /// *who*, metering answers *how much*.
+    pub fn guarded(ledger: Arc<UsageLedger>, admission: Arc<AdmissionControl>) -> Arc<Self> {
+        Arc::new(Self {
+            seen: Mutex::new(SeenCache::new(SEEN_CACHE_CAPACITY)),
+            ledger: Some(ledger),
+            admission: Some(admission),
+        })
+    }
+
+    /// The access list this gateway enforces, if it enforces one.
+    pub fn admission(&self) -> Option<&Arc<AdmissionControl>> {
+        self.admission.as_ref()
     }
 
     /// The ledger this gateway meters against, if it is metered at all.
@@ -164,6 +189,35 @@ impl GatewayServer {
             )
             .await?;
             anyhow::bail!("rejected gateway request: {reason}");
+        }
+
+        // Admission first: whether a device may ask at all is a cheaper
+        // and more fundamental question than how much it has left, and a
+        // refused device should not touch the quota tables.
+        if let Some(admission) = &self.admission {
+            match admission.admit(&request.payload.device_id, request.payload.invitation.as_ref())? {
+                Admission::Admit { reason } => {
+                    eprintln!(
+                        "gateway: admitting {} ({})",
+                        crate::hex_encode(&request.payload.device_id),
+                        reason.as_str()
+                    );
+                }
+                Admission::Refuse { reason } => {
+                    write_frame(
+                        &mut client,
+                        &GatewayResponse {
+                            accepted: false,
+                            reason: Some(reason.clone()),
+                        },
+                    )
+                    .await?;
+                    anyhow::bail!(
+                        "not admitted {}: {reason}",
+                        crate::hex_encode(&request.payload.device_id)
+                    );
+                }
+            }
         }
 
         // Quota is checked before the target is dialled, so a device that
@@ -319,6 +373,19 @@ impl GatewayClient {
         target_host: &str,
         target_port: u16,
     ) -> Result<TcpStream> {
+        Self::connect_via_with_invitation(identity, gateway_addr, target_host, target_port, None)
+            .await
+    }
+
+    /// Same, presenting a capability the gateway issued. Needed for a
+    /// gateway running an invitation-only policy.
+    pub async fn connect_via_with_invitation(
+        identity: &Identity,
+        gateway_addr: SocketAddr,
+        target_host: &str,
+        target_port: u16,
+        invitation: Option<SignedInvitation>,
+    ) -> Result<TcpStream> {
         let mut stream = TcpStream::connect(gateway_addr).await?;
 
         let timestamp_unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -328,6 +395,7 @@ impl GatewayClient {
             nonce: random_id16(),
             target_host: target_host.to_string(),
             target_port,
+            invitation,
         };
         let signature = identity.sign(&bincode::serialize(&payload)?).to_vec();
         let request = SignedGatewayRequest { payload, signature };
@@ -401,6 +469,7 @@ mod tests {
             nonce: [0u8; 16],
             target_host: "127.0.0.1".to_string(),
             target_port: 1,
+            invitation: None,
         };
         // Signed by the WRONG key -- doesn't match device_id above.
         let signature = real_signer.sign(&bincode::serialize(&payload).unwrap()).to_vec();
@@ -430,6 +499,7 @@ mod tests {
             nonce: [0u8; 16],
             target_host: "H".repeat(31415), // distinctive length, see replace_first_u64_le
             target_port: 80,
+            invitation: None,
         };
         // Signature doesn't need to verify -- the parser runs before auth.
         let signature = vec![0u8; 64];
@@ -478,6 +548,7 @@ mod tests {
             nonce: [42u8; 16],
             target_host: "127.0.0.1".to_string(),
             target_port: target_addr.port(),
+            invitation: None,
         };
         let signature = identity.sign(&bincode::serialize(&payload).unwrap()).to_vec();
         let captured = SignedGatewayRequest { payload, signature };
@@ -859,6 +930,207 @@ mod tests {
         assert_eq!(all[0].granted_bytes, Some(5_000_000));
         assert_eq!(all[0].consumed_bytes, 0);
         assert_eq!(all[0].remaining(), Some(5_000_000));
+    }
+
+    // -----------------------------------------------------------------
+    // Admission, end to end through a real relay
+    // -----------------------------------------------------------------
+
+    use crate::admission::{AdmissionControl, AdmissionPolicy, SignedInvitation};
+
+    fn guarded_gateway(
+        policy: AdmissionPolicy,
+    ) -> (Arc<UsageLedger>, Arc<AdmissionControl>, Identity) {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let gateway_identity = Identity::generate_ephemeral();
+        let ledger = UsageLedger::new(store.clone(), QuotaPolicy::Open);
+        let admission = AdmissionControl::new(store, gateway_identity.public_key(), policy);
+        (ledger, admission, gateway_identity)
+    }
+
+    async fn spawn_guarded(
+        ledger: Arc<UsageLedger>,
+        admission: Arc<AdmissionControl>,
+    ) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(GatewayServer::guarded(ledger, admission).serve(listener));
+        addr
+    }
+
+    /// The gap this closes: before admission, any device that could
+    /// generate a keypair could ask a gateway to relay for it, and
+    /// generating a keypair is free.
+    #[tokio::test]
+    async fn an_invite_only_gateway_turns_away_a_stranger() {
+        let target = spawn_echo_target().await;
+        let (ledger, admission, _) = guarded_gateway(AdmissionPolicy::InviteOnly);
+        let gateway = spawn_guarded(ledger, admission).await;
+
+        let stranger = Identity::generate_ephemeral();
+        let err = GatewayClient::connect_via(&stranger, gateway, "127.0.0.1", target.port())
+            .await
+            .expect_err("a stranger must not get through an invite-only gateway");
+        assert!(err.to_string().contains("invitation-only"), "unhelpful refusal: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_valid_invitation_gets_a_device_through() {
+        let target = spawn_echo_target().await;
+        let (ledger, admission, gateway_identity) = guarded_gateway(AdmissionPolicy::InviteOnly);
+        let gateway = spawn_guarded(ledger, admission).await;
+
+        let guest = Identity::generate_ephemeral();
+        let invite =
+            SignedInvitation::issue(&gateway_identity, guest.public_key(), 3600, None).unwrap();
+
+        let mut tunnel = GatewayClient::connect_via_with_invitation(
+            &guest,
+            gateway,
+            "127.0.0.1",
+            target.port(),
+            Some(invite),
+        )
+        .await
+        .expect("an invited device must get through");
+
+        tunnel.write_all(b"invited").await.unwrap();
+        let mut buf = [0u8; 7];
+        tunnel.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"invited");
+    }
+
+    /// After redeeming once, a reconnect works without the token -- or
+    /// anyone who closed the app would be locked out until they found
+    /// their invitation again.
+    #[tokio::test]
+    async fn a_redeemed_invitation_does_not_have_to_be_presented_again() {
+        let target = spawn_echo_target().await;
+        let (ledger, admission, gateway_identity) = guarded_gateway(AdmissionPolicy::InviteOnly);
+        let gateway = spawn_guarded(ledger, admission).await;
+
+        let guest = Identity::generate_ephemeral();
+        let invite =
+            SignedInvitation::issue(&gateway_identity, guest.public_key(), 3600, None).unwrap();
+
+        GatewayClient::connect_via_with_invitation(
+            &guest, gateway, "127.0.0.1", target.port(), Some(invite),
+        )
+        .await
+        .unwrap();
+
+        GatewayClient::connect_via(&guest, gateway, "127.0.0.1", target.port())
+            .await
+            .expect("a redeemed device should stay admitted");
+    }
+
+    /// An invitation is safe to pass around in the open precisely because
+    /// stealing one gains nothing: the request presenting it is signed by
+    /// the requesting device, which must match.
+    #[tokio::test]
+    async fn a_stolen_invitation_is_useless_to_the_thief() {
+        let target = spawn_echo_target().await;
+        let (ledger, admission, gateway_identity) = guarded_gateway(AdmissionPolicy::InviteOnly);
+        let gateway = spawn_guarded(ledger, admission).await;
+
+        let invited = Identity::generate_ephemeral();
+        let thief = Identity::generate_ephemeral();
+        let invite =
+            SignedInvitation::issue(&gateway_identity, invited.public_key(), 3600, None).unwrap();
+
+        let err = GatewayClient::connect_via_with_invitation(
+            &thief, gateway, "127.0.0.1", target.port(), Some(invite),
+        )
+        .await
+        .expect_err("a stolen invitation must not work");
+        assert!(err.to_string().contains("different device"), "{err}");
+    }
+
+    /// Revocation, end to end: blocking must stop a device that was
+    /// already admitted, including one holding a live invitation.
+    #[tokio::test]
+    async fn blocking_a_device_stops_it_reconnecting() {
+        let target = spawn_echo_target().await;
+        let (ledger, admission, _) = guarded_gateway(AdmissionPolicy::Open);
+        let gateway = spawn_guarded(ledger, admission.clone()).await;
+
+        let device = Identity::generate_ephemeral();
+        GatewayClient::connect_via(&device, gateway, "127.0.0.1", target.port())
+            .await
+            .expect("an open gateway admits anyone at first");
+
+        admission.block(&device.public_key(), Some("used too much")).unwrap();
+
+        let err = GatewayClient::connect_via(&device, gateway, "127.0.0.1", target.port())
+            .await
+            .expect_err("a blocked device must be refused");
+        assert!(err.to_string().contains("blocked"), "{err}");
+    }
+
+    /// An invitation can hand over the data allowance at the same time,
+    /// so admitting someone and giving them 500MB is one action rather
+    /// than two.
+    #[tokio::test]
+    async fn an_invitation_can_carry_the_data_grant_with_it() {
+        let target = spawn_echo_target().await;
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let gateway_identity = Identity::generate_ephemeral();
+        // RequireGrant, so getting through proves the grant really landed.
+        let ledger = UsageLedger::new(store.clone(), QuotaPolicy::RequireGrant);
+        let admission =
+            AdmissionControl::new(store, gateway_identity.public_key(), AdmissionPolicy::InviteOnly);
+        let gateway = spawn_guarded(ledger.clone(), admission).await;
+
+        let guest = Identity::generate_ephemeral();
+        let invite = SignedInvitation::issue(
+            &gateway_identity,
+            guest.public_key(),
+            3600,
+            Some(500_000_000),
+        )
+        .unwrap();
+
+        GatewayClient::connect_via_with_invitation(
+            &guest, gateway, "127.0.0.1", target.port(), Some(invite),
+        )
+        .await
+        .expect("the invitation should admit and fund in one step");
+
+        let usage = ledger.device_usage(&guest.public_key()).unwrap();
+        assert_eq!(usage.granted_bytes, Some(500_000_000));
+    }
+
+    /// A gateway with no admission control must behave exactly as it did
+    /// before this existed.
+    #[tokio::test]
+    async fn a_gateway_without_admission_control_is_unchanged() {
+        let target = spawn_echo_target().await;
+        let ledger = ledger(QuotaPolicy::Open);
+        let gateway = spawn_metered_gateway(ledger).await;
+
+        let stranger = Identity::generate_ephemeral();
+        GatewayClient::connect_via(&stranger, gateway, "127.0.0.1", target.port())
+            .await
+            .expect("an ungated gateway relays for anyone");
+        assert!(GatewayServer::new().admission().is_none());
+    }
+
+    /// A refused device must not appear in the usage tables at all --
+    /// admission is checked first precisely so a stranger cannot make a
+    /// gateway write rows on its behalf.
+    #[tokio::test]
+    async fn a_refused_device_leaves_no_trace_in_the_usage_tables() {
+        let target = spawn_echo_target().await;
+        let (ledger, admission, _) = guarded_gateway(AdmissionPolicy::InviteOnly);
+        let gateway = spawn_guarded(ledger.clone(), admission).await;
+
+        let stranger = Identity::generate_ephemeral();
+        let _ = GatewayClient::connect_via(&stranger, gateway, "127.0.0.1", target.port()).await;
+
+        let usage = ledger.device_usage(&stranger.public_key()).unwrap();
+        assert_eq!(usage.sessions, 0);
+        assert_eq!(usage.consumed_bytes, 0);
+        assert!(ledger.recent_sessions(10).unwrap().is_empty());
     }
 
 }

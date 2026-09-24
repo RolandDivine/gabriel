@@ -294,6 +294,57 @@ The outbox stores ciphertext, not plaintext. A queued message can sit on
 disk for up to 24h waiting for a neighbour, and the plaintext should not
 be there during that time -- asserted by a test, not assumed.
 
+## Gateway admission
+
+Metering answers *how much*. This answers *who* -- the question the gateway
+module carried a "deliberately NOT here yet" note about since it was
+written. Until now any device that could generate a keypair could ask a
+gateway to relay for it, and generating a keypair is free.
+
+```bash
+gabriel-gatewayd --invite-only                        # turn strangers away
+gabriel-gatewayd --invite <device-id>=500MB           # issue a pass, with data
+gabriel-gatewayd --allow <device-id>                  # add to the allow list
+gabriel-gatewayd --block <device-id>                  # revoke
+gabriel-gatewayd --access                             # show the list
+gabriel-client fetch --via <addr> --invite <token>    # present one
+```
+
+Checked in a fixed order: **blocked** beats everything, then the allow
+list, then an invitation, then the default policy. Blocked has to win or
+an invitation already handed out could never be taken back -- that is what
+revocation means here.
+
+**Invitations are verified, not stored.** A gateway signs one with the
+same Ed25519 identity it already announces under, so verifying is checking
+its own signature. Nothing is recorded at issue time, which means an
+invitation can be handed out offline, over the mesh, or read off a screen,
+and still work on a gateway that has never heard of it.
+
+**Leaking one is harmless.** An invitation names the device it is for, and
+the gateway request presenting it is signed by the requesting device, so a
+stolen invitation is useless to the thief -- they cannot produce that
+signature. That is what makes a capability safe to pass around in the
+open, and it has its own test.
+
+Reusable until expiry, deliberately: single-use would lock out a device
+that reconnects after a dropped connection, which is a worse failure than
+a capability working twice. Redeeming one records the device, so a
+reconnect needs no token at all.
+
+Admission is checked *before* the quota check and before the target is
+dialled, so a refused device never causes an outbound connection and never
+writes a row on the gateway's behalf -- asserted by a test.
+
+The desktop client has a **Who may use** screen for all of it: the policy
+toggle, invitation creation with an optional data allowance, and the
+allow/block list.
+
+Verified end to end on the real binaries: a stranger refused with a
+readable reason, an invitation issued carrying 500MB, that guest admitted
+and fetching real HTTP through the relay, the grant landing in the usage
+table, and the guest reconnecting afterwards with no token.
+
 ## Gateway metering
 
 The relay counts every byte against the device that asked for it, and the

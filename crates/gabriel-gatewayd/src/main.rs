@@ -22,6 +22,7 @@ use std::time::Duration;
 use clap::Parser;
 use gabriel_core::discovery::DiscoveryService;
 use gabriel_core::gateway::{GatewayServer, DEFAULT_GATEWAY_PORT};
+use gabriel_core::admission::{AdmissionControl, AdmissionPolicy, SignedInvitation, DEFAULT_INVITATION_TTL_SECS};
 use gabriel_core::metering::{QuotaPolicy, UsageLedger};
 use gabriel_core::identity::Identity;
 use gabriel_core::routing::{MeshRouter, NeighborTable, DEFAULT_MESH_PORT};
@@ -63,6 +64,29 @@ struct Args {
     /// Print what each device has used, and exit.
     #[arg(long)]
     usage: bool,
+    /// Only relay for devices on the allow list or presenting a valid
+    /// invitation. Without this, anyone who can generate a keypair may
+    /// ask -- and generating a keypair is free.
+    #[arg(long)]
+    invite_only: bool,
+    /// Add a device to the allow list and exit. Repeatable.
+    #[arg(long = "allow")]
+    allow: Vec<String>,
+    /// Block a device and exit. A block beats an invitation, which is how
+    /// one already handed out gets revoked. Repeatable.
+    #[arg(long = "block")]
+    block: Vec<String>,
+    /// Issue an invitation and print it: <hex-device-id>[=<bytes>].
+    /// The optional amount is a data allowance handed over with it, so
+    /// admitting someone and funding them is one step. Repeatable.
+    #[arg(long = "invite")]
+    invites: Vec<String>,
+    /// How long a new invitation is valid for, in hours.
+    #[arg(long, default_value_t = DEFAULT_INVITATION_TTL_SECS / 3600)]
+    invite_hours: u64,
+    /// Print the access list, and exit.
+    #[arg(long)]
+    access: bool,
     /// SQLite file backing the mesh router's store-and-forward outbox.
     /// Queued messages survive a restart because this is a real file, not
     /// in-memory state.
@@ -90,6 +114,70 @@ async fn main() -> anyhow::Result<()> {
         QuotaPolicy::Open
     };
     let ledger = UsageLedger::new(store.clone(), policy);
+
+    let admission_policy = if args.invite_only {
+        AdmissionPolicy::InviteOnly
+    } else {
+        AdmissionPolicy::Open
+    };
+    let admission =
+        AdmissionControl::new(store.clone(), identity.public_key(), admission_policy);
+
+    if !args.allow.is_empty() || !args.block.is_empty() {
+        for entry in &args.allow {
+            let device_id = parse_device_id(entry)?;
+            admission.allow(&device_id, None)?;
+            println!("allowed {}", gabriel_core::hex_encode(&device_id));
+        }
+        for entry in &args.block {
+            let device_id = parse_device_id(entry)?;
+            admission.block(&device_id, None)?;
+            println!("blocked {}", gabriel_core::hex_encode(&device_id));
+        }
+        return Ok(());
+    }
+
+    if !args.invites.is_empty() {
+        for entry in &args.invites {
+            let (device_id, grant) = parse_invite(entry)?;
+            let invitation = SignedInvitation::issue(
+                &identity,
+                device_id,
+                args.invite_hours * 3600,
+                grant,
+            )?;
+            println!("invitation for {}", gabriel_core::hex_encode(&device_id));
+            println!("  valid for {} hour(s){}", args.invite_hours,
+                grant.map(|g| format!(", carrying {}", format_bytes(g))).unwrap_or_default());
+            println!();
+            println!("{}", invitation.to_token()?);
+            println!();
+            println!("Give this to them however you like -- it is safe to send in the");
+            println!("open, because it only works for that one device.");
+        }
+        return Ok(());
+    }
+
+    if args.access {
+        let entries = admission.entries()?;
+        if entries.is_empty() {
+            println!("the access list is empty ({})", match admission_policy {
+                AdmissionPolicy::Open => "this gateway admits anyone",
+                AdmissionPolicy::InviteOnly => "so nobody can get in without an invitation",
+            });
+            return Ok(());
+        }
+        println!("{:<66} {:<9} {}", "device", "state", "note");
+        for entry in entries {
+            println!(
+                "{:<66} {:<9} {}",
+                gabriel_core::hex_encode(&entry.device_id),
+                entry.state.as_str(),
+                entry.note.unwrap_or_default()
+            );
+        }
+        return Ok(());
+    }
 
     // Granting and reporting are administrative: do the work and exit
     // rather than starting a relay nobody asked for.
@@ -198,13 +286,18 @@ async fn main() -> anyhow::Result<()> {
     } else {
         println!("gateway relay listening on {} -- unmetered", args.bind);
     }
+    if args.invite_only {
+        println!("admission: invitation-only -- issue one with --invite <device-id>");
+    } else {
+        println!("admission: open -- any device may ask (use --invite-only to change that)");
+    }
     // Runs forever; Ctrl+C stops the process. No graceful shutdown wired up
     // yet -- fine for a console dev process, revisit once this becomes a
     // real Windows Service with its own stop-control handler.
-    if metered {
-        GatewayServer::metered(ledger).run(args.bind).await
-    } else {
-        GatewayServer::new().run(args.bind).await
+    match (metered, args.invite_only) {
+        (_, true) => GatewayServer::guarded(ledger, admission).run(args.bind).await,
+        (true, false) => GatewayServer::metered(ledger).run(args.bind).await,
+        (false, false) => GatewayServer::new().run(args.bind).await,
     }
 }
 
@@ -236,6 +329,18 @@ fn parse_grant(entry: &str) -> anyhow::Result<([u8; 32], u64)> {
         anyhow::bail!("a grant cannot be negative");
     }
     Ok((device_id, (value * multiplier as f64) as u64))
+}
+
+/// `<hex-device-id>` or `<hex-device-id>=<bytes>`, where the amount may
+/// carry a KB/MB/GB suffix.
+fn parse_invite(entry: &str) -> anyhow::Result<([u8; 32], Option<u64>)> {
+    match entry.split_once('=') {
+        Some(_) => {
+            let (device_id, bytes) = parse_grant(entry)?;
+            Ok((device_id, Some(bytes)))
+        }
+        None => Ok((parse_device_id(entry)?, None)),
+    }
 }
 
 fn parse_device_id(hex: &str) -> anyhow::Result<[u8; 32]> {

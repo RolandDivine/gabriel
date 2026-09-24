@@ -238,6 +238,7 @@
   <div class="page hide" id="p-network"></div>
   <div class="page hide" id="p-messages"></div>
   <div class="page hide" id="p-gateway"></div>
+  <div class="page hide" id="p-access"></div>
   <div class="page hide" id="p-usage"></div>
   <div class="page hide" id="p-outbox"></div>
   <div class="page hide" id="p-crypto"></div>
@@ -265,6 +266,8 @@ const TABS = [
     blurb: "Signed messages flooded across the mesh, with a hop-count TTL and duplicate suppression." },
   { id: "gateway",  icon: "⇄", label: "Gateway",   title: "Gateway sharing",
     blurb: "Share this device's internet connection with peers that have none, or route your own traffic through someone else's." },
+  { id: "access",   icon: "26BF", label: "Who may use", title: "Who may use your connection",
+    blurb: "Decide who is allowed to connect at all. Invite people with a signed pass, allow or block individual devices, or leave it open to anyone nearby." },
   { id: "usage",    icon: "25D4", label: "Data usage", title: "Data usage",
     blurb: "Who has used your shared connection, how much, and how much they have left. Every relayed byte is counted against the device that asked for it." },
   { id: "outbox",   icon: "⧖", label: "Outbox",    title: "Store-and-forward outbox",
@@ -436,6 +439,7 @@ const forms = {
   idMsg: "gabriel discovery announcement", idKey: "", idVerifyMsg: "", idSig: "",
   gnpType: "Messaging", gnpDest: "", gnpSeq: "1", gnpExp: "300", gnpPayload: "hello mesh", gnpHex: "",
   compose: "", rename: "", grantId: "", grantMb: "500",
+  invId: "", invHours: "168", invMb: "", accId: "",
 };
 function bind(node, key) {
   node.value = forms[key] || "";
@@ -447,8 +451,8 @@ function bind(node, key) {
 // live data
 // ---------------------------------------------------------------------
 let outbox = [], neighbors = [], history = [], logs = [], keys = [], tables = [];
-let usage = [], sessions = [];
-let lastResult = { fetch: null, sign: null, verify: null, gnp: null, idSign: null, idVerify: null };
+let usage = [], sessions = [], access = [];
+let lastResult = { fetch: null, sign: null, verify: null, gnp: null, idSign: null, idVerify: null, invite: null };
 
 async function refresh() {
   try {
@@ -468,6 +472,7 @@ async function refresh() {
   setBadge("network", status.peer_count);
     setBadge("outbox", status.outbox_count);
     setBadge("usage", status.metered_device_count);
+    setBadge("access", status.blocked_count);
 
   if (status.running) {
     peers = await invoke("list_peers");
@@ -480,6 +485,9 @@ async function refresh() {
     }
     if (tab === "network") neighbors = await invoke("list_neighbors");
     if (tab === "outbox") { try { outbox = await invoke("list_outbox"); } catch (e) { outbox = []; } }
+    if (tab === "access") {
+      try { access = await invoke("list_access"); } catch (e) { access = []; }
+    }
     if (tab === "usage") {
       try {
         usage = await invoke("list_usage");
@@ -499,6 +507,7 @@ function render(which) {
   if (which === "network") return renderNetwork();
   if (which === "messages") return renderMessages();
   if (which === "gateway") return renderGateway();
+  if (which === "access") return renderAccess();
   if (which === "usage") return renderUsage();
   if (which === "outbox") return renderOutbox();
   if (which === "crypto") return renderCrypto();
@@ -911,6 +920,182 @@ function renderOutbox() {
       });
       c.append(table(["Message", "To", "Attempts", "Expires in", ""], rows));
     }
+    page.append(c);
+  });
+}
+
+// ---------------------------------------------------------------------
+// Who may use your connection
+// ---------------------------------------------------------------------
+function renderAccess() {
+  replace("p-access", (page) => {
+    if (!status) return;
+    if (!status.running) return notRunning(page);
+
+    // --- the policy itself ---
+    const p = card("Who may ask",
+      "This decides who is allowed to connect at all. Setting a data allowance is a separate question — that one is on the Data usage tab.");
+
+    const current = el("div", "row");
+    const label = el("div");
+    label.style.flex = "1";
+    label.append(el("div", null, status.invite_only
+      ? "Invitation only — strangers are turned away."
+      : "Open — any device on your network may ask to use your connection."));
+    const sub = el("div", "hint");
+    sub.style.margin = "3px 0 0";
+    sub.textContent = status.invite_only
+      ? "Only devices you have allowed, or who hold an invitation you issued, can get through."
+      : "Anyone who can run Gabriel can ask. You can still see and limit what they use, but nothing stops them asking.";
+    label.append(sub);
+    current.append(label);
+
+    current.append(button(status.invite_only ? "Open it up" : "Require an invitation",
+      status.invite_only ? "ghost" : "", async () => {
+        try {
+          await invoke("set_invite_only", { inviteOnly: !status.invite_only });
+          toast(status.invite_only ? "Now open to anyone" : "Now invitation-only", "ok");
+        } catch (e) { toast(String(e), "bad"); }
+      }));
+    p.append(current);
+
+    if (status.gateway_sharing) {
+      const note = el("div", "banner");
+      note.style.cssText = "margin:12px 0 0";
+      note.append(el("b", null, "Sharing is running."));
+      note.append(document.createTextNode(" A change to this setting applies to new connections after you stop and start sharing again."));
+      p.append(note);
+    }
+    page.append(p);
+
+    // --- invitations ---
+    const inv = card("Invite someone",
+      "An invitation is a signed pass for one specific device. It is safe to send however you like — by message, or read aloud — because it only works for the device it names. Anyone else holding it can do nothing with it.");
+
+    const r1 = el("div", "row");
+    r1.append(field("Their device id (64 hex characters)", bind(input("invId", "3f9a…"), "invId")));
+    inv.append(r1);
+
+    const r2 = el("div", "row");
+    r2.append(field("Valid for (hours)", bind(input("invHours", "168"), "invHours")));
+    r2.append(field("Data allowance in MB (optional)", bind(input("invMb", ""), "invMb")));
+    r2.append(button("Create invitation", "", async () => {
+      const hours = Number(forms.invHours);
+      if (!isFinite(hours) || hours <= 0) return toast("Hours must be a positive number", "bad");
+      const mb = forms.invMb.trim();
+      let grant = null;
+      if (mb !== "") {
+        const n = Number(mb);
+        if (!isFinite(n) || n < 0) return toast("That is not a number of megabytes", "bad");
+        grant = Math.round(n * 1e6);
+      }
+      try {
+        lastResult.invite = { ok: await invoke("create_invitation", {
+          deviceId: forms.invId, hours: Math.round(hours), grantBytes: grant }) };
+        toast("Invitation created", "ok");
+      } catch (e) {
+        lastResult.invite = { err: String(e) };
+        toast(String(e), "bad");
+      }
+      render("access");
+    }));
+    inv.append(r2);
+
+    // Offer the peers we can see, so an id does not have to be typed out.
+    const routable = peers.filter((x) => x.device_id !== status.device_id);
+    if (routable.length) {
+      const pick = el("div", "row");
+      pick.style.marginTop = "4px";
+      const sel = select("invPeer", [{ value: "", label: "…or pick a device nearby" }]
+        .concat(routable.map((x) => ({ value: x.device_id, label: x.display_name + "  ·  " + short(x.device_id) }))));
+      sel.onchange = () => {
+        if (!sel.value) return;
+        forms.invId = sel.value;
+        const f = $("invId");
+        if (f) f.value = sel.value;
+      };
+      pick.append(field("", sel));
+      inv.append(pick);
+    }
+
+    if (lastResult.invite) {
+      if (lastResult.invite.err) {
+        inv.append(el("div", "note bad", lastResult.invite.err));
+      } else {
+        const v = lastResult.invite.ok;
+        inv.append(el("div", "note ok",
+          "For " + short(v.device_id) + " · expires " +
+          new Date(v.expires_unix * 1000).toLocaleString() +
+          (v.data_grant_bytes ? " · carries " + bytes(v.data_grant_bytes) : "")));
+        inv.append(el("pre", "out", v.token));
+        const acts = el("div", "row");
+        acts.append(copyBtn(v.token));
+        acts.append(button("Clear", "ghost tiny", () => { lastResult.invite = null; render("access"); }));
+        inv.append(acts);
+      }
+    }
+    page.append(inv);
+
+    // --- the list ---
+    const c = card("Access list",
+      "Devices you have explicitly allowed or blocked. Anything not listed here follows the setting above. A block always wins — it beats an invitation you already handed out, which is how you take one back.");
+
+    if (access.length === 0) {
+      c.append(el("div", "empty", "Nothing listed yet. Devices admitted by an invitation appear here automatically."));
+    } else {
+      const rows = access.map((a) => {
+        const tr = document.createElement("tr");
+
+        const who = el("td");
+        who.append(el("span", null, a.display_name || short(a.device_id)));
+        tr.append(who);
+
+        const st = el("td");
+        st.append(el("span", "tag " + (a.state === "allowed" ? "gw" : "no"), a.state));
+        tr.append(st);
+
+        tr.append(el("td", null, a.note || "—"));
+        tr.append(el("td", "mono", clock(a.updated_at)));
+
+        const act = el("td");
+        if (a.state === "allowed") {
+          act.append(button("Block", "ghost tiny", async () => {
+            try { await invoke("block_device", { deviceId: a.device_id, note: null }); toast("Blocked"); }
+            catch (e) { toast(String(e), "bad"); }
+          }));
+        } else {
+          act.append(button("Allow", "ghost tiny", async () => {
+            try { await invoke("allow_device", { deviceId: a.device_id, note: null }); toast("Allowed", "ok"); }
+            catch (e) { toast(String(e), "bad"); }
+          }));
+        }
+        act.append(button("Remove", "ghost tiny", async () => {
+          try { await invoke("forget_device", { deviceId: a.device_id }); toast("Removed from the list"); }
+          catch (e) { toast(String(e), "bad"); }
+        }));
+        act.append(copyBtn(a.device_id));
+        tr.append(act);
+        return tr;
+      });
+      c.append(table(["Device", "State", "Note", "Changed", ""], rows));
+    }
+
+    const addRow = el("div", "row");
+    addRow.style.marginTop = "12px";
+    addRow.append(field("Device id", bind(input("accId", "3f9a…"), "accId")));
+    addRow.append(button("Allow", "", async () => {
+      try {
+        await invoke("allow_device", { deviceId: forms.accId, note: null });
+        forms.accId = ""; toast("Allowed", "ok");
+      } catch (e) { toast(String(e), "bad"); }
+    }));
+    addRow.append(button("Block", "danger", async () => {
+      try {
+        await invoke("block_device", { deviceId: forms.accId, note: null });
+        forms.accId = ""; toast("Blocked");
+      } catch (e) { toast(String(e), "bad"); }
+    }));
+    c.append(addRow);
     page.append(c);
   });
 }

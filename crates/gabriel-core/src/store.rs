@@ -134,6 +134,13 @@ impl Store {
             CREATE INDEX IF NOT EXISTS gateway_usage_device
                 ON gateway_usage(device_id);
 
+            CREATE TABLE IF NOT EXISTS gateway_admissions (
+                device_id BLOB PRIMARY KEY,
+                state TEXT NOT NULL,
+                note TEXT,
+                updated_at INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS gateway_quotas (
                 device_id BLOB PRIMARY KEY,
                 granted_bytes INTEGER NOT NULL,
@@ -418,6 +425,91 @@ impl Store {
             params![ended_at],
         )?;
         Ok(closed)
+    }
+
+    // -----------------------------------------------------------------
+    // Gateway admission
+    // -----------------------------------------------------------------
+
+    /// Sets or replaces a device's access-list entry.
+    pub fn set_admission(
+        &self,
+        device_id: &[u8; 32],
+        state: crate::admission::AdmissionState,
+        note: Option<&str>,
+        updated_at: i64,
+    ) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO gateway_admissions (device_id, state, note, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(device_id) DO UPDATE SET
+                state = excluded.state,
+                note = excluded.note,
+                updated_at = excluded.updated_at",
+            params![&device_id[..], state.as_str(), note, updated_at],
+        )?;
+        Ok(())
+    }
+
+    /// One device's entry, or `None` when it has never been allowed or
+    /// blocked -- which is the case that falls through to the gateway's
+    /// default policy.
+    pub fn admission_entry(
+        &self,
+        device_id: &[u8; 32],
+    ) -> Result<Option<crate::admission::AdmissionEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let row: Option<(String, Option<String>, i64)> = conn
+            .query_row(
+                "SELECT state, note, updated_at FROM gateway_admissions WHERE device_id = ?1",
+                params![&device_id[..]],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+
+        Ok(row.and_then(|(state, note, updated_at)| {
+            // An unrecognised state is treated as no entry rather than
+            // guessed at. Guessing "allowed" would fail open on a corrupt
+            // row, which is the wrong direction for an access list.
+            crate::admission::AdmissionState::from_str(&state).map(|state| {
+                crate::admission::AdmissionEntry {
+                    device_id: *device_id,
+                    state,
+                    note,
+                    updated_at,
+                }
+            })
+        }))
+    }
+
+    pub fn all_admissions(&self) -> Result<Vec<crate::admission::AdmissionEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT device_id, state, note, updated_at
+             FROM gateway_admissions ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let device_id: Vec<u8> = row.get(0)?;
+            let state: String = row.get(1)?;
+            Ok((to_array32(device_id), state, row.get::<_, Option<String>>(2)?, row.get::<_, i64>(3)?))
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (device_id, state, note, updated_at) = row?;
+            if let Some(state) = crate::admission::AdmissionState::from_str(&state) {
+                out.push(crate::admission::AdmissionEntry { device_id, state, note, updated_at });
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn clear_admission(&self, device_id: &[u8; 32]) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "DELETE FROM gateway_admissions WHERE device_id = ?1",
+            params![&device_id[..]],
+        )?;
+        Ok(())
     }
 }
 

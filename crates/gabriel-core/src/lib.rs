@@ -14,6 +14,8 @@
 //!     hop-count TTL and dedup (no routing table needed at this scale)
 //!   - protocol: Gabriel Network Protocol (GNP) packet model
 //!   - store: local-first SQLite data model (users, devices, contacts, messages, rooms, routes)
+//!   - admission: who may ask a gateway to relay for them, via an
+//!     allow list and signed capability invitations
 //!   - sealed: end-to-end encryption (X25519 + ChaCha20-Poly1305), so a
 //!     relay can forward a message without being able to read it
 //!   - metering: per-device byte accounting and quotas for the gateway
@@ -29,6 +31,7 @@
 //! these pieces are solid (see "Recommended build order" in the
 //! blueprint).
 
+pub mod admission;
 pub mod crypto;
 pub mod discovery;
 #[cfg(test)]

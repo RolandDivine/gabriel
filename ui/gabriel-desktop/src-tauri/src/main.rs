@@ -46,6 +46,10 @@ use tokio::net::TcpListener;
 use gabriel_core::crypto::{self, AgilePublicKey, AgileSignature, AgileSigningKey, AlgorithmId};
 use gabriel_core::discovery::{DiscoveryService, DISCOVERY_MULTICAST_ADDR, DISCOVERY_PORT};
 use gabriel_core::gateway::{GatewayClient, GatewayServer, DEFAULT_GATEWAY_PORT};
+use gabriel_core::admission::{
+    AdmissionControl, AdmissionPolicy, AdmissionState, SignedInvitation,
+    DEFAULT_INVITATION_TTL_SECS,
+};
 use gabriel_core::metering::{QuotaPolicy, UsageLedger};
 use gabriel_core::identity::Identity;
 use gabriel_core::protocol::{GnpPacket, PacketType};
@@ -94,6 +98,10 @@ struct Node {
     /// relay is running, so usage from previous runs is readable at any
     /// time -- it lives in the same SQLite file as everything else.
     ledger: Arc<UsageLedger>,
+    /// Who may ask. Rebuilt when the policy changes, because the policy
+    /// is fixed at construction -- the access list itself lives in the
+    /// database and is unaffected.
+    admission: Mutex<Arc<AdmissionControl>>,
 }
 
 impl Node {
@@ -246,6 +254,11 @@ struct StatusView {
     require_grant: bool,
     total_relayed_bytes: u64,
     metered_device_count: usize,
+    /// True when the relay turns away devices that are neither on the
+    /// allow list nor presenting an invitation.
+    invite_only: bool,
+    allowed_count: usize,
+    blocked_count: usize,
     error: Option<String>,
 }
 
@@ -341,6 +354,23 @@ struct UsageView {
 }
 
 #[derive(Serialize)]
+struct AccessEntryView {
+    device_id: String,
+    display_name: Option<String>,
+    state: String,
+    note: Option<String>,
+    updated_at: i64,
+}
+
+#[derive(Serialize)]
+struct InvitationView {
+    token: String,
+    device_id: String,
+    expires_unix: u64,
+    data_grant_bytes: Option<u64>,
+}
+
+#[derive(Serialize)]
 struct SessionView {
     session_id: String,
     device_id: String,
@@ -394,6 +424,9 @@ fn node_status(state: State<AppState>) -> StatusView {
             require_grant: false,
             total_relayed_bytes: 0,
             metered_device_count: 0,
+            invite_only: false,
+            allowed_count: 0,
+            blocked_count: 0,
             error: state.error.lock().unwrap().clone(),
         };
     };
@@ -401,6 +434,8 @@ fn node_status(state: State<AppState>) -> StatusView {
     let peers = node.discovery.peers();
     let gateway = node.gateway.lock().unwrap();
     let devices = node.ledger.all_device_usage().unwrap_or_default();
+    let admission = node.admission.lock().unwrap().clone();
+    let access = admission.entries().unwrap_or_default();
 
     StatusView {
         running: true,
@@ -427,6 +462,9 @@ fn node_status(state: State<AppState>) -> StatusView {
         require_grant: node.ledger.policy() == QuotaPolicy::RequireGrant,
         total_relayed_bytes: devices.iter().map(|d| d.consumed_bytes).sum(),
         metered_device_count: devices.len(),
+        invite_only: admission.policy() == AdmissionPolicy::InviteOnly,
+        allowed_count: access.iter().filter(|e| e.state == AdmissionState::Allowed).count(),
+        blocked_count: access.iter().filter(|e| e.state == AdmissionState::Blocked).count(),
         error: state.error.lock().unwrap().clone(),
     }
 }
@@ -844,11 +882,14 @@ fn start_gateway(state: State<AppState>, port: u16) -> Result<String, String> {
         .map_err(|e| format!("couldn't bind {bind}: {e}"))?;
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
 
-    // Always metered: a gateway that cannot say who used what is not
-    // something anyone should share a connection through.
+    // Always metered and always gated: a gateway that cannot say who
+    // used what, or decide who may ask, is not something anyone should
+    // share a connection through. An open policy still admits everyone --
+    // the difference is that it is now a choice rather than an absence.
+    let admission = node.admission.lock().unwrap().clone();
     let task = node
         .runtime
-        .spawn(GatewayServer::metered(node.ledger.clone()).serve(listener));
+        .spawn(GatewayServer::guarded(node.ledger.clone(), admission).serve(listener));
     *node.gateway.lock().unwrap() = Some(GatewayHandle {
         addr,
         started_at: Instant::now(),
@@ -975,6 +1016,152 @@ fn revoke_data(state: State<AppState>, device_id: String) -> Result<(), String> 
     node.ledger.revoke(&id).map_err(|e| e.to_string())?;
     state.log.push("warn", format!("revoked the grant for {}", short(&device_id)));
     Ok(())
+}
+
+// ---------------------------------------------------------------------
+// Gateway: who may ask
+// ---------------------------------------------------------------------
+
+/// The access list: devices explicitly allowed or blocked. Devices with
+/// no entry fall through to the gateway's policy.
+#[tauri::command]
+fn list_access(state: State<AppState>) -> Result<Vec<AccessEntryView>, String> {
+    let node = state.node.lock().unwrap();
+    let node = node.as_ref().ok_or("node is not running")?;
+    let names: HashMap<[u8; 32], String> = node
+        .discovery
+        .peers()
+        .into_iter()
+        .map(|p| (p.device_id, p.display_name))
+        .collect();
+
+    let admission = node.admission.lock().unwrap().clone();
+
+    Ok(admission
+        .entries()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|e| AccessEntryView {
+            device_id: gabriel_core::hex_encode(&e.device_id),
+            display_name: names.get(&e.device_id).cloned(),
+            state: e.state.as_str().to_string(),
+            note: e.note,
+            updated_at: e.updated_at,
+        })
+        .collect())
+}
+
+/// Switches between admitting anyone and requiring an invitation.
+/// Rebuilds the control, because the policy is fixed at construction --
+/// the access list itself is untouched.
+#[tauri::command]
+fn set_invite_only(state: State<AppState>, invite_only: bool) -> Result<(), String> {
+    let node = state.node.lock().unwrap();
+    let node = node.as_ref().ok_or("node is not running")?;
+    let policy = if invite_only {
+        AdmissionPolicy::InviteOnly
+    } else {
+        AdmissionPolicy::Open
+    };
+    *node.admission.lock().unwrap() = AdmissionControl::new(
+        node.store.clone(),
+        node.identity.public_key(),
+        policy,
+    );
+    state.log.push(
+        "info",
+        if invite_only {
+            "gateway is now invitation-only"
+        } else {
+            "gateway now admits any device that asks"
+        },
+    );
+    if node.gateway.lock().unwrap().is_some() {
+        state.log.push(
+            "warn",
+            "restart sharing for the new admission policy to take effect on the running relay",
+        );
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn allow_device(state: State<AppState>, device_id: String, note: Option<String>) -> Result<(), String> {
+    let id = parse_device_id(&device_id).ok_or("device id must be 64 hex characters")?;
+    let node = state.node.lock().unwrap();
+    let node = node.as_ref().ok_or("node is not running")?;
+    node.admission
+        .lock()
+        .unwrap()
+        .allow(&id, note.as_deref())
+        .map_err(|e| e.to_string())?;
+    state.log.push("info", format!("allowed {}", short(&device_id)));
+    Ok(())
+}
+
+#[tauri::command]
+fn block_device(state: State<AppState>, device_id: String, note: Option<String>) -> Result<(), String> {
+    let id = parse_device_id(&device_id).ok_or("device id must be 64 hex characters")?;
+    let node = state.node.lock().unwrap();
+    let node = node.as_ref().ok_or("node is not running")?;
+    node.admission
+        .lock()
+        .unwrap()
+        .block(&id, note.as_deref())
+        .map_err(|e| e.to_string())?;
+    state.log.push("warn", format!("blocked {}", short(&device_id)));
+    Ok(())
+}
+
+/// Removes an entry, returning the device to whatever the policy says
+/// rather than allowing or blocking it.
+#[tauri::command]
+fn forget_device(state: State<AppState>, device_id: String) -> Result<(), String> {
+    let id = parse_device_id(&device_id).ok_or("device id must be 64 hex characters")?;
+    let node = state.node.lock().unwrap();
+    let node = node.as_ref().ok_or("node is not running")?;
+    node.admission.lock().unwrap().forget(&id).map_err(|e| e.to_string())?;
+    state.log.push("info", format!("removed the access entry for {}", short(&device_id)));
+    Ok(())
+}
+
+/// Issues a capability for one device. Safe to send in the open: it only
+/// works for the device it names, because the request presenting it is
+/// signed by that device.
+#[tauri::command]
+fn create_invitation(
+    state: State<AppState>,
+    device_id: String,
+    hours: u64,
+    grant_bytes: Option<u64>,
+) -> Result<InvitationView, String> {
+    let id = parse_device_id(&device_id).ok_or("device id must be 64 hex characters")?;
+    if hours == 0 {
+        return Err("an invitation valid for zero hours would already be expired".into());
+    }
+    let node = state.node.lock().unwrap();
+    let node = node.as_ref().ok_or("node is not running")?;
+
+    let invitation = SignedInvitation::issue(&node.identity, id, hours * 3600, grant_bytes)
+        .map_err(|e| e.to_string())?;
+    let token = invitation.to_token().map_err(|e| e.to_string())?;
+
+    state.log.push(
+        "info",
+        format!("issued an invitation for {} valid {hours}h", short(&device_id)),
+    );
+    Ok(InvitationView {
+        token,
+        device_id,
+        expires_unix: invitation.invitation.expires_unix,
+        data_grant_bytes: grant_bytes,
+    })
+}
+
+/// The default invitation lifetime, so the UI does not hardcode its own.
+#[tauri::command]
+fn default_invite_hours() -> u64 {
+    DEFAULT_INVITATION_TTL_SECS / 3600
 }
 
 // ---------------------------------------------------------------------
@@ -1463,6 +1650,14 @@ fn start_node(display_name: String, log: Log) -> anyhow::Result<Node> {
         _ => {}
     }
 
+    // Open by default, matching the ledger: switching a gateway on
+    // should not silently lock out peers already using it.
+    let admission = AdmissionControl::new(
+        store.clone(),
+        identity.public_key(),
+        AdmissionPolicy::Open,
+    );
+
     let neighbors = NeighborTable::new();
     let (router, mut inbox_rx) = MeshRouter::new(identity.clone(), neighbors.clone(), store.clone());
 
@@ -1569,6 +1764,7 @@ fn start_node(display_name: String, log: Log) -> anyhow::Result<Node> {
         manual_neighbors,
         gateway: Mutex::new(None),
         ledger,
+        admission: Mutex::new(admission),
     })
 }
 
@@ -1612,6 +1808,13 @@ fn main() {
             list_sessions,
             grant_data,
             revoke_data,
+            list_access,
+            set_invite_only,
+            allow_device,
+            block_device,
+            forget_device,
+            create_invitation,
+            default_invite_hours,
             identity_sign,
             identity_verify,
             crypto_algorithms,
