@@ -594,7 +594,8 @@ function renderOverview() {
       ["Store-and-forward", "working", "Undeliverable messages persist to SQLite and retry when a neighbour appears."],
       ["Gateway sharing", "working", "An authenticated TCP relay, with replay rejection and a concurrency cap."],
       ["Crypto agility", "working", "Ed25519 and ML-DSA-44 behind one tagged verify() call."],
-      ["End-to-end encryption", "not built", "Messages are signed, not encrypted. MLS is the plan; it isn't here yet."],
+      ["End-to-end encryption", "working", "X25519 + ChaCha20-Poly1305. A relay forwards your message without being able to read it."],
+      ["Forward secrecy (recipient)", "not built", "A fresh key per message protects against a compromised sender, but not a compromised recipient. That needs a ratchet."],
       ["Gateway admission policy", "not built", "Any device with a keypair can ask to relay through a gateway."],
       ["GACL path scoring", "not built", "No adaptive Wi-Fi/Ethernet/mobile path selection yet."],
     ];
@@ -701,8 +702,8 @@ function renderMessages() {
     if (!status.running) return notRunning(page);
 
     const b = el("div", "banner");
-    b.append(el("b", null, "Messages are signed, not encrypted."));
-    b.append(document.createTextNode(" A recipient can verify who sent a message and that nobody altered it, but the text is readable by every device that relays it. End-to-end encryption is not implemented — don't send anything sensitive."));
+    b.append(el("b", null, "Messages are end-to-end encrypted."));
+    b.append(document.createTextNode(" Only the device you send to can read the text — the devices that relay it on the way cannot. Two things are still visible to relays: who you are messaging, and when. And if someone steals the recipient's device key they could read old messages they had saved, because there is no ratchet yet."));
     page.append(b);
 
     const routable = peers.filter((p) => p.routable);

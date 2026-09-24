@@ -42,11 +42,20 @@ If the other device is switched off, the message waits. It is saved on
 your disk, so it survives closing Gabriel or restarting your computer. The
 moment that device comes back, the message goes out.
 
-> ⚠️ **Important, and we would rather tell you than hide it:** messages
-> are **signed but not encrypted**. That means the recipient can prove it
-> really came from you and that nobody changed it. But any device that
-> passes the message along can read it. **Do not send anything private
-> yet.** Proper end-to-end encryption is the next thing being built.
+**Your messages are private.** Only the device you send to can read them.
+Gabriel messages hop from device to device to reach their destination, and
+none of the devices in between can read a word — they carry a sealed
+envelope they have no key for.
+
+Two things are still worth knowing:
+
+- **Who you message, and when, is visible** to the devices relaying it.
+  They cannot read *what* you said, but they can see that you said
+  something to someone. Hiding that is a much harder problem.
+- **If someone steals the other person's device key**, and had been
+  quietly saving copies of your old messages, they could read those old
+  messages. Protecting against that needs a further layer that is not
+  built yet.
 
 ### 3. You can share your internet with people near you
 
@@ -250,9 +259,11 @@ recover it for you.** There is no password reset. Write it down and keep
 it somewhere safe and offline.
 
 **Are my messages private?**
-**Not yet.** They are signed, so nobody can forge or alter them, but they
-are not encrypted, so a device relaying them could read them. Treat them
-like a postcard. Encryption is next on the list.
+Yes. Only the device you send to can read them. Every device that passes
+the message along the way sees an encrypted blob and nothing more.
+
+What is *not* hidden: the fact that you messaged that person, and when.
+Relays need to see who a message is addressed to in order to get it there.
 
 **Does it work on my phone?**
 Not yet. Windows only for now. Phone support is planned and is the biggest
@@ -266,7 +277,7 @@ We would rather you know this up front than find out the hard way.
 
 | Not yet built | What it means for you |
 | --- | --- |
-| **Message encryption** | Messages can be read by devices relaying them |
+| **Protection against a stolen key** | If someone steals a device key *and* saved old messages, they could read those old ones. Each new message is safe. |
 | **Deciding who may connect** | Anyone on your network can ask to use your gateway — you can limit how much they use, but not yet who may ask |
 | **Phone app** | Windows computers only |
 | **Sending on 6 of 13 chains** | Bitcoin, Litecoin, Dogecoin, Solana, Tron and Cosmos can receive but not send |

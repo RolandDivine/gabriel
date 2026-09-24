@@ -14,6 +14,8 @@
 //!     hop-count TTL and dedup (no routing table needed at this scale)
 //!   - protocol: Gabriel Network Protocol (GNP) packet model
 //!   - store: local-first SQLite data model (users, devices, contacts, messages, rooms, routes)
+//!   - sealed: end-to-end encryption (X25519 + ChaCha20-Poly1305), so a
+//!     relay can forward a message without being able to read it
 //!   - metering: per-device byte accounting and quotas for the gateway
 //!     relay, so shared bandwidth is countable and limitable rather than
 //!     merely offered
@@ -36,6 +38,7 @@ pub mod identity;
 pub mod metering;
 pub mod protocol;
 pub mod routing;
+pub mod sealed;
 pub mod store;
 mod wire;
 

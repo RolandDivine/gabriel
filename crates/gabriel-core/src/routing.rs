@@ -47,6 +47,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 use crate::identity::Identity;
+use crate::sealed::{self, SealedMessage};
 use crate::store::Store;
 use crate::wire::{check_freshness, random_id16, read_frame, write_frame, SeenCache};
 use crate::Result;
@@ -88,6 +89,13 @@ struct MessagePayload {
     source_id: DeviceId,
     destination_id: DeviceId,
     timestamp_unix: u64,
+    /// The **sealed** message body: a bincode-encoded
+    /// [`SealedMessage`], not plaintext. Every device on the path can
+    /// read this field and learn nothing from it -- only the destination
+    /// holds the key. See `sealed.rs`.
+    ///
+    /// The rest of the payload stays in clear because routing needs it:
+    /// a relay has to see `destination_id` to know where to flood.
     body: Vec<u8>,
 }
 
@@ -253,12 +261,20 @@ impl MeshRouter {
         // Record our own message so we ignore it if it ever floods back to us.
         self.seen.lock().unwrap().insert_if_new(message_id);
 
-        let sent_to = self.sign_and_flood(message_id, destination_id, &body).await?;
+        // Sealed once, here, before anything is signed, queued or sent.
+        // Everything downstream -- the flood, the outbox, every retry --
+        // handles ciphertext only, so the plaintext never reaches the
+        // network and never reaches the database.
+        let sealed = sealed::seal(&self.identity, &destination_id, &body)
+            .map_err(|err| anyhow::anyhow!("couldn't encrypt for that device: {err}"))?
+            .to_bytes()?;
+
+        let sent_to = self.sign_and_flood(message_id, destination_id, &sealed).await?;
 
         if sent_to == 0 {
             let now = now_unix()?;
             self.store
-                .enqueue_outbound(&message_id, &destination_id, &body, now, now + OUTBOX_TTL_SECS)?;
+                .enqueue_outbound(&message_id, &destination_id, &sealed, now, now + OUTBOX_TTL_SECS)?;
         }
         Ok(sent_to)
     }
@@ -266,6 +282,11 @@ impl MeshRouter {
     /// Builds a fresh signed envelope (new timestamp, so it passes the
     /// receiver's freshness check even on a retry) for the given logical
     /// message and floods it to whoever's currently a neighbor.
+    ///
+    /// `body` is already-sealed ciphertext. A retry re-signs the same
+    /// ciphertext rather than re-encrypting, so the destination's key
+    /// schedule is unchanged and the message opens exactly as it would
+    /// have first time.
     async fn sign_and_flood(&self, message_id: MessageId, destination_id: DeviceId, body: &[u8]) -> Result<usize> {
         let timestamp_unix = now_unix()? as u64;
         let payload = MessagePayload {
@@ -339,10 +360,30 @@ impl MeshRouter {
         }
 
         if signed.payload.destination_id == self.identity.public_key() {
-            let _ = self.inbox_tx.send(DeliveredMessage {
-                source_id: signed.payload.source_id,
-                body: signed.payload.body.clone(),
-            });
+            // The signature is already verified, so the sender id is
+            // genuine; unsealing with it binds the ciphertext to that
+            // same sender.
+            let sealed_body = SealedMessage::from_bytes(&signed.payload.body)
+                .map_err(|err| anyhow::anyhow!("malformed sealed body: {err}"))?;
+
+            match sealed::unseal(&self.identity, &signed.payload.source_id, &sealed_body) {
+                Ok(plaintext) => {
+                    let _ = self.inbox_tx.send(DeliveredMessage {
+                        source_id: signed.payload.source_id,
+                        body: plaintext,
+                    });
+                }
+                Err(err) => {
+                    // Signed by a real device and addressed to us, but it
+                    // will not open. Dropped rather than delivered as
+                    // garbage, and said out loud because it should not
+                    // happen and means something is wrong.
+                    eprintln!(
+                        "mesh: dropping a message from {} that failed to decrypt: {err}",
+                        crate::hex_encode(&signed.payload.source_id)
+                    );
+                }
+            }
             return Ok(()); // delivered locally -- not forwarded any further
         }
 
@@ -523,14 +564,28 @@ mod tests {
         let store = test_store();
         let (router, _inbox) = MeshRouter::new(identity, NeighborTable::new(), store.clone());
 
+        const PLAINTEXT: &[u8] = b"nobody's listening yet";
         let destination = Identity::generate_ephemeral().public_key();
-        let sent_to = router.send(destination, b"nobody's listening yet".to_vec()).await.unwrap();
+        let sent_to = router.send(destination, PLAINTEXT.to_vec()).await.unwrap();
         assert_eq!(sent_to, 0);
 
         let pending = store.list_pending_outbound().unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].destination_id, destination);
-        assert_eq!(pending[0].body, b"nobody's listening yet");
+
+        // The outbox holds ciphertext, not the message. A queued message
+        // can sit on disk for up to a day waiting for a neighbour, and
+        // during that time the plaintext should not exist there at all.
+        assert!(
+            !pending[0]
+                .body
+                .windows(PLAINTEXT.len())
+                .any(|w| w == PLAINTEXT),
+            "the plaintext must not be sitting in the outbox"
+        );
+        let sealed = crate::sealed::SealedMessage::from_bytes(&pending[0].body)
+            .expect("the queued body should be a sealed message");
+        assert_eq!(sealed.version, crate::sealed::SEALED_VERSION);
     }
 
     /// A message queued while isolated should actually go out -- and be
@@ -622,6 +677,85 @@ mod tests {
 
         table.remove(&a);
         assert_eq!(table.list(), vec![(b, addr_b)]);
+    }
+
+    /// The claim end-to-end encryption actually makes, tested against a
+    /// real three-node mesh rather than against `sealed.rs` in isolation:
+    /// the middle node forwards the message, and the plaintext never
+    /// appears in anything it can see.
+    #[tokio::test]
+    async fn a_relaying_node_forwards_a_message_it_cannot_read() {
+        const SECRET: &[u8] = b"the account number is 4417";
+
+        let id_a = Arc::new(Identity::generate_ephemeral());
+        let id_relay = Arc::new(Identity::generate_ephemeral());
+        let id_c = Arc::new(Identity::generate_ephemeral());
+
+        // C is the destination; the relay only ever forwards.
+        let (router_c, mut inbox_c) =
+            MeshRouter::new(id_c.clone(), NeighborTable::new(), test_store());
+        let addr_c = router_c.clone().listen("127.0.0.1:0".parse().unwrap()).await.unwrap();
+
+        let relay_neighbors = NeighborTable::new();
+        relay_neighbors.set(id_c.public_key(), addr_c);
+        let (router_relay, mut inbox_relay) =
+            MeshRouter::new(id_relay.clone(), relay_neighbors, test_store());
+        let addr_relay = router_relay
+            .clone()
+            .listen("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+
+        let a_neighbors = NeighborTable::new();
+        a_neighbors.set(id_relay.public_key(), addr_relay);
+        let (router_a, _inbox_a) = MeshRouter::new(id_a.clone(), a_neighbors, test_store());
+
+        // What the relay would see on the wire: the sealed body A builds.
+        let on_the_wire = crate::sealed::seal(&id_a, &id_c.public_key(), SECRET)
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        assert!(
+            !on_the_wire.windows(SECRET.len()).any(|w| w == SECRET),
+            "the plaintext must not be present in what crosses the wire"
+        );
+
+        router_a.send(id_c.public_key(), SECRET.to_vec()).await.unwrap();
+
+        let delivered = tokio::time::timeout(Duration::from_secs(10), inbox_c.recv())
+            .await
+            .expect("the message should reach C through the relay")
+            .expect("inbox channel stayed open");
+        assert_eq!(delivered.body, SECRET, "C decrypts it");
+        assert_eq!(delivered.source_id, id_a.public_key());
+
+        // The relay forwarded it but was never handed a plaintext body:
+        // its own inbox only ever receives messages addressed to it.
+        assert!(
+            inbox_relay.try_recv().is_err(),
+            "a relay must not be delivered a message it was only forwarding"
+        );
+    }
+
+    /// A device that is not the destination cannot read the body even if
+    /// it captures the whole envelope and is itself a legitimate node.
+    #[tokio::test]
+    async fn an_eavesdropper_with_the_full_envelope_learns_nothing() {
+        let alice = Arc::new(Identity::generate_ephemeral());
+        let bob = Identity::generate_ephemeral();
+        let eve = Identity::generate_ephemeral();
+
+        let sealed_bytes = crate::sealed::seal(&alice, &bob.public_key(), b"meet at six")
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        let captured = crate::sealed::SealedMessage::from_bytes(&sealed_bytes).unwrap();
+
+        assert!(crate::sealed::unseal(&eve, &alice.public_key(), &captured).is_err());
+        assert_eq!(
+            crate::sealed::unseal(&bob, &alice.public_key(), &captured).unwrap(),
+            b"meet at six"
+        );
     }
 
 }

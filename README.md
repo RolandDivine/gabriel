@@ -252,6 +252,48 @@ cargo run -p gabriel-client -- mesh --identity-path a.key --store-path a.sqlite 
 # within 15s (the retry interval), C receives the message A queued in the PREVIOUS run
 ```
 
+## End-to-end encryption
+
+Message bodies are sealed before they are signed, so a relay forwards a
+message it cannot read. Ephemeral-static X25519, an HKDF-SHA256 key
+schedule and ChaCha20-Poly1305 -- HPKE base mode's shape, assembled from
+audited primitives rather than hand-rolled.
+
+The recipient's X25519 key is the birational conversion of its Ed25519
+device id, which means **any device can encrypt to any device id it can
+address**, including one several hops away that it has never seen. That is
+load-bearing rather than convenient: routing addresses a destination by
+device id and floods towards it, so an encryption scheme needing a key
+fetched in advance would only work for peers already visible on the LAN --
+exactly the case that did not need a mesh.
+
+The cost, stated rather than buried: this reuses one keypair for signing
+and for key agreement, which dalek's own docs advise against, citing
+[eprint 2021/509](https://eprint.iacr.org/2021/509). That paper finds
+joint security holds for this construction and libsodium ships the same
+conversions, so it is a considered tradeoff. `SealedMessage::version`
+exists so a v2 carrying a separately-derived X25519 key (distributed in
+the already-signed discovery beacon) can land without a flag day.
+
+Sender authentication is deliberately *not* done in `sealed`. Routing's
+existing Ed25519 signature covers the whole envelope, so a relay can still
+verify a message is genuine before forwarding it without being able to
+read it.
+
+**What it gives:** confidentiality from relays, integrity, and forward
+secrecy against later compromise of the *sender* -- the ephemeral key is
+generated per message and never stored.
+
+**What it does not give:** forward secrecy against compromise of the
+*recipient*, whose identity key is long-lived. That needs a ratchet, which
+needs per-peer session state the mesh does not carry yet. Nor metadata
+privacy: who is talking to whom, and when, is visible to every relay,
+because routing needs the destination in clear.
+
+The outbox stores ciphertext, not plaintext. A queued message can sit on
+disk for up to 24h waiting for a neighbour, and the plaintext should not
+be there during that time -- asserted by a test, not assumed.
+
 ## Gateway metering
 
 The relay counts every byte against the device that asked for it, and the

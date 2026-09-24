@@ -61,6 +61,26 @@ impl Identity {
         self.signing_key.sign(message).to_bytes()
     }
 
+
+    /// The X25519 secret this device encrypts with, derived from the same
+    /// Ed25519 seed.
+    ///
+    /// Per ed25519-dalek's own documentation, `to_scalar_bytes` yields a
+    /// valid X25519 `StaticSecret` whose public key is exactly
+    /// `verifying_key().to_montgomery()` -- which is what lets any peer
+    /// encrypt to a bare device id. See `sealed.rs` for the tradeoff that
+    /// reusing one keypair this way represents; it is deliberate, and
+    /// versioned so it can be replaced.
+    pub fn x25519_secret_bytes(&self) -> [u8; 32] {
+        self.signing_key.to_scalar_bytes()
+    }
+
+    /// This device's X25519 public key -- the one peers derive
+    /// independently from its device id.
+    pub fn x25519_public_bytes(&self) -> [u8; 32] {
+        crate::sealed::montgomery_bytes(&self.signing_key.verifying_key())
+    }
+
     /// Verifies `signature` over `message` under the identity claimed by
     /// `public_key`. Used to authenticate discovery announcements (and,
     /// later, GNP packets) from peers we don't have a live session with yet

@@ -29,3 +29,11 @@ rand = "0.8"
 # ml-dsa re-exports the `signature` crate traits (Signer/Verifier/Keypair)
 # it needs directly, so no separate `signature` dependency here.
 ml-dsa = "0.1"
+# End-to-end encryption (see sealed.rs): X25519 key agreement, HKDF-SHA256
+# key schedule, ChaCha20-Poly1305 AEAD. All RustCrypto / dalek, all audited,
+# and all doing one small job each rather than one library doing everything.
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+curve25519-dalek = "4"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
